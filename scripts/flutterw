@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Cloud tasks use the existing checkout; a Git worktree is unnecessary.
+if [[ -x /workspace/.tooling/flutter/bin/flutter ]]; then
+  export XDG_CONFIG_HOME=/workspace/.config
+  export ANALYZER_STATE_LOCATION_OVERRIDE=/workspace/.cache/dart-analysis
+  export PUB_CACHE=/workspace/.cache/pub
+  export GRADLE_USER_HOME=/workspace/.cache/gradle
+  export ANDROID_USER_HOME=/workspace/.cache/android-user
+  export CI=true
+  if [[ -x /workspace/.tooling/jdk-21/bin/javac ]]; then
+    export JAVA_HOME=/workspace/.tooling/jdk-21
+    export PATH="$JAVA_HOME/bin:$PATH"
+  fi
+  if [[ -d /workspace/.tooling/android-sdk ]]; then
+    export ANDROID_HOME=/workspace/.tooling/android-sdk
+    export ANDROID_SDK_ROOT=/workspace/.tooling/android-sdk
+    python3 /workspace/ytdlp_app/scripts/configure_cloud_network.py
+  fi
+  exec /workspace/.tooling/flutter/bin/flutter "$@"
+fi
+exec flutter "$@"

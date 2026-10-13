@@ -1,0 +1,2 @@
+Source: https://github.com/google/fonts/tree/66928797f271fed5ee428544e7229685e2d90127/ofl/notosansjp
+License: SIL Open Font License 1.1 (OFL.txt)

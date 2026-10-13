@@ -1,0 +1,99 @@
+# Mix Player
+
+[機能仕様書 v0.1](docs/specification.md)に基づく Flutter アプリです。iPhone を主対象とし、Android でも利用できます。既存の FastAPI から Mix と再生 URL の JSON を取得し、メディア本体には端末から HTTPS で直接接続します。
+
+[画面サンプル（テスト音源）](docs/screenshots/player.png)
+
+## 実装した機能
+
+- HTTPS API URL と X-API-Key の設定。API キーは iOS Keychain / Android の安全なストレージに保存します。
+- YouTube Mix の20曲取得、サムネイル・タイトル・チャンネル・長さの表示。
+- 手動・末尾での追加取得と、video_id による重複排除。
+- 音声の連続再生。現在の曲と次の2曲分を解決し、曲が切り替わると先読みを補充します。
+- フォアグラウンドの動画＋音声再生。
+- 再生・一時停止・前後の曲・停止・シーク、HTTPS メディア URL の直接再生テスト。
+- 最後に取得した Mix URL の復元、エラー表示、音声のメディア通知・ロック画面操作用設定。
+
+バックエンドのソースはこのリポジトリに含みません。API URL とキーはアプリ内の「API サーバー設定」から入力してください。実在する接続先やキーはソース・コミットに含めないでください。
+
+## 開発環境
+
+Flutter 3.32.5 / Dart 3.8.1 を使用します。直接依存は仕様書のバージョンを固定し、推移的依存は pubspec.lock に保存しています。Android は API 24（Android 7.0）以上、iOS は 13.0 以上です。Android のビルドには SDK 34〜36（依存プラグインが使用）、Build Tools 35 / 36、NDK 27.0.12077973、JDK 17 または21を使用します。
+
+~~~bash
+flutter pub get --enforce-lockfile
+flutter analyze --no-pub
+flutter test --no-pub
+flutter devices
+flutter run
+~~~
+
+既に iOS / Android のプロジェクトとプラグイン設定を用意しています。生成し直した場合に限り、次のコマンドでバックグラウンド音声・Keychain・Android メディアサービスを再設定できます。
+
+~~~bash
+python3 scripts/configure_platforms.py
+~~~
+
+## iPhone にインストール
+
+Mac に Flutter、Xcode、CocoaPods を用意してください。
+
+~~~bash
+flutter pub get --enforce-lockfile
+cd ios
+pod install
+cd ..
+open ios/Runner.xcworkspace
+~~~
+
+Xcode の Runner → Signing & Capabilities で Apple Account の Team と一意の Bundle Identifier を設定し、iPhone を接続して flutter run を実行します。UIBackgroundModes=audio と Keychain 用 entitlements は設定済みです。署名設定・端末の Developer Mode は利用する Apple Account と端末に合わせて設定してください。
+
+## Android にインストール
+
+Android SDK とエミュレーター、または USB デバッグを有効にした端末を用意します。
+
+~~~bash
+flutter run -d <device-id>
+flutter build apk --debug --no-pub
+~~~
+
+APK の生成先は build/app/outputs/flutter-apk/app-debug.apk です。debug APK は開発・テスト用です。
+
+## API 契約
+
+| エンドポイント | JSON ボディ | 使用する応答 |
+| --- | --- | --- |
+| POST /mix | url, count=20 | session_id, playlist_title, items |
+| POST /mix/{session_id}/extend | count=20 | session_id, items |
+| POST /stream | video_id | audio.url, video_audio.url |
+
+各 POST に Content-Type、Accept、X-API-Key を付与し、90秒でタイムアウトします。API のベース URL は HTTPS のみで、認証情報・クエリ・フラグメントを拒否します。API リダイレクトを自動追跡せず、鍵を別の接続先へ転送しません。期限付きメディア URL とセッション ID はメモリ上だけで保持します。
+
+## クラウドでの開発
+
+クラウドの既存チェックアウト /workspace/ytdlp_app を使います。タスクは既に分離されているので、Git worktree の作成は不要です。
+
+~~~bash
+bash scripts/setup_cloud.sh
+bash scripts/flutterw analyze --no-pub
+bash scripts/flutterw test --no-pub
+bash scripts/flutterw build web --no-pub --no-web-resources-cdn
+~~~
+
+Android ビルド環境も準備する場合:
+
+~~~bash
+python3 scripts/install_jdk.py
+python3 scripts/install_android_sdk.py
+bash scripts/flutterw build apk --debug --no-pub --target-platform android-arm64
+~~~
+
+Flutter SDK とキャッシュはチェックアウト外の /workspace/.tooling と /workspace/.cache に配置します。書き込み不可のホームディレクトリを変更する必要はありません。
+
+Web は画面とコンパイルの検証用です。ブラウザーから実際の API に接続するには、その API が CORS を許可している必要があります。iPhone / Android の通信はブラウザーの CORS 制約を受けません。
+
+## 検証と現在の範囲
+
+テストは JSON 変換、API リクエスト、HTTPS 制約、応答の秘匿、Mix の追加・競合、先読み・スキップ、停止時の競合、動画の解放、設定ダイアログ、狭い画面の表示を確認します。実行結果は [検証記録](docs/validation.md) に記載します。
+
+仕様書で拡張候補とされている URL 期限切れの自動再取得、期限切れ Mix セッションの自動再作成、再生キュー・位置の永続化は未実装です。期限切れ時は曲を選び直すか Mix を再取得してください。長時間のバックグラウンド再生、Oracle Cloud の実 API、iPhone のロック画面・通信回線切り替えは実機での検証が必要です。
