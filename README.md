@@ -55,9 +55,12 @@ Android SDK とエミュレーター、または USB デバッグを有効にし
 ~~~bash
 flutter run -d <device-id>
 flutter build apk --debug --no-pub
+flutter build apk --release --no-pub
 ~~~
 
-APK の生成先は build/app/outputs/flutter-apk/app-debug.apk です。debug APK は開発・テスト用です。
+APK の生成先は build/app/outputs/flutter-apk/ 内の app-debug.apk と app-release.apk です。app-release.apk はリリースモードで最適化されますが、現時点ではテスト用の鍵で署名します。ストア配布用の独自署名鍵は未設定です。
+
+GitHub Actions の Flutter checks でも両方をビルドします。GitHub にログインして成功した実行の Artifacts から mix-player-debug-apk または mix-player-release-apk をダウンロードし、ZIP 内の APK を取り出してください。Actions の Run workflow から手動で再ビルドすることもできます。
 
 ## API 契約
 
