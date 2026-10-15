@@ -1,0 +1,63 @@
+name: iOS unsigned IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/ios.yml'
+      - '.flutter-version'
+      - 'ios/**'
+      - 'lib/**'
+      - 'assets/**'
+      - 'pubspec.yaml'
+      - 'pubspec.lock'
+
+permissions:
+  contents: read
+
+jobs:
+  ios:
+    runs-on: macos-15
+    timeout-minutes: 35
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+      COCOAPODS_DISABLE_STATS: 'true'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Show Apple build tools
+        run: |
+          xcodebuild -version
+          pod --version
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.32.5'
+          channel: stable
+          cache: true
+      - run: flutter pub get --enforce-lockfile
+      - name: Build release app for iPhone without signing
+        run: flutter build ios --release --no-codesign --no-pub
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          app=build/ios/iphoneos/Runner.app
+          plutil -lint "$app/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$app/Info.plist"
+          xcrun lipo -verify_arch arm64 "$app/Runner"
+          mkdir -p build/ios/ipa/Payload
+          ditto "$app" build/ios/ipa/Payload/Runner.app
+          cd build/ios/ipa
+          zip -q -r -y MixPlayer-unsigned.ipa Payload
+          zip -T MixPlayer-unsigned.ipa
+          shasum -a 256 MixPlayer-unsigned.ipa > MixPlayer-unsigned.ipa.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mix-player-ios-unsigned-ipa
+          path: |
+            build/ios/ipa/MixPlayer-unsigned.ipa
+            build/ios/ipa/MixPlayer-unsigned.ipa.sha256
+          if-no-files-found: error
+          compression-level: 0

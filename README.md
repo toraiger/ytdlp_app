@@ -48,6 +48,19 @@ open ios/Runner.xcworkspace
 
 Xcode の Runner → Signing & Capabilities で Apple Account の Team と一意の Bundle Identifier を設定し、iPhone を接続して flutter run を実行します。UIBackgroundModes=audio と Keychain 用 entitlements は設定済みです。署名設定・端末の Developer Mode は利用する Apple Account と端末に合わせて設定してください。
 
+### GitHub Actions で署名なし IPA を作成
+
+Actions の **iOS unsigned IPA** を開き、Run workflow から実行できます。iOS のソースやビルド設定を main に push した場合も実行します。macOS 15 / Xcode 16.4 / Flutter 3.32.5 で次のビルドを行い、iPhone 用の arm64 アプリを Payload/Runner.app の形式で IPA にまとめます。
+
+~~~bash
+flutter pub get --enforce-lockfile
+flutter build ios --release --no-codesign --no-pub
+~~~
+
+成功した実行の Artifacts から **mix-player-ios-unsigned-ipa** をダウンロードし、ZIP 内の **MixPlayer-unsigned.ipa** を取り出してください。SHA-256 の確認用ファイルも含みます。Apple の証明書や署名用 Secrets は不要です。
+
+この IPA は SideStore や Sideloadly で自分の Apple Account を使って再署名してインストールします。無料アカウントの署名期限は7日間で、継続利用には更新が必要です。署名なしの IPA を iPhone で開くだけではインストールできません。iOS の Bundle Identifier は jp.toraiger.mixPlayerApp です。実機でのインストールと音声再生は別途確認してください。
+
 ## Android にインストール
 
 Android SDK とエミュレーター、または USB デバッグを有効にした端末を用意します。
