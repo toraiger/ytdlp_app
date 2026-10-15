@@ -46,7 +46,7 @@ jobs:
           plutil -lint "$app/Info.plist"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist"
           /usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$app/Info.plist"
-          xcrun lipo -verify_arch arm64 "$app/Runner"
+          xcrun lipo "$app/Runner" -verify_arch arm64
           mkdir -p build/ios/ipa/Payload
           ditto "$app" build/ios/ipa/Payload/Runner.app
           cd build/ios/ipa
