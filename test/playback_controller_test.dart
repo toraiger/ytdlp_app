@@ -59,10 +59,11 @@ void main() {
     await drain();
     expect(resolutions, ['a', 'b', 'c']);
     expect(audio.entries.map((e) => e.track.videoId), ['a', 'b', 'c']);
-    expect(
-      audio.entries.map((e) => e.httpHeaders['User-Agent']),
-      ['audio-a', 'audio-b', 'audio-c'],
-    );
+    expect(audio.entries.map((e) => e.httpHeaders['User-Agent']), [
+      'audio-a',
+      'audio-b',
+      'audio-c',
+    ]);
     expect(playback.isPlaying, isTrue);
     expect(playback.upcomingCount, 2);
     audio.advance(1);

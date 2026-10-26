@@ -49,11 +49,15 @@ void main() {
   });
   test('Malformed media headers are rejected', () {
     expect(
-      () => StreamFormat.fromJson({'http_headers': ['not-a-map']}),
+      () => StreamFormat.fromJson({
+        'http_headers': ['not-a-map'],
+      }),
       throwsFormatException,
     );
     expect(
-      () => StreamFormat.fromJson({'http_headers': {'User-Agent': 42}}),
+      () => StreamFormat.fromJson({
+        'http_headers': {'User-Agent': 42},
+      }),
       throwsA(isA<TypeError>()),
     );
   });
