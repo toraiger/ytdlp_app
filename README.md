@@ -50,7 +50,7 @@ Xcode の Runner → Signing & Capabilities で Apple Account の Team と一意
 
 ### GitHub Actions で署名なし IPA を作成
 
-Actions の **iOS unsigned IPA** を開き、Run workflow から実行できます。iOS のソースやビルド設定を main に push した場合も実行します。macOS 15 / Xcode 16.4 / Flutter 3.32.5 で次のビルドを行い、iPhone 用の arm64 アプリを Payload/Runner.app の形式で IPA にまとめます。
+Actions の **iOS unsigned IPA** を開き、Run workflow から対象のブランチを選んで実行できます。作業ブランチを含め、iOS のソースやビルド設定を push した場合も実行します。macOS 15 / Xcode 16.4 / Flutter 3.32.5 で次のビルドを行い、iPhone 用の arm64 アプリを Payload/Runner.app の形式で IPA にまとめます。
 
 ~~~bash
 flutter pub get --enforce-lockfile
