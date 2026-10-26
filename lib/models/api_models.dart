@@ -19,6 +19,16 @@ Map<String, dynamic> jsonObject(Object? value) {
   return value;
 }
 
+Map<String, String> mediaHttpHeaders(Object? value) {
+  if (value == null) return const {};
+  final headers = <String, String>{};
+  for (final entry in jsonObject(value).entries) {
+    if (entry.key.toLowerCase() == 'x-api-key') continue;
+    headers[entry.key] = entry.value as String;
+  }
+  return Map.unmodifiable(headers);
+}
+
 String requiredString(Map<String, dynamic> json, String key) {
   final value = json[key];
   if (value is! String || value.trim().isEmpty) {
@@ -130,6 +140,7 @@ class StreamFormat {
     this.vcodec,
     this.acodec,
     this.url,
+    this.httpHeaders = const {},
   });
 
   factory StreamFormat.fromJson(Map<String, dynamic> json) => StreamFormat(
@@ -139,6 +150,7 @@ class StreamFormat {
     vcodec: json['vcodec'] as String?,
     acodec: json['acodec'] as String?,
     url: playableUri(json['url']),
+    httpHeaders: mediaHttpHeaders(json['http_headers']),
   );
 
   final String? formatId;
@@ -147,6 +159,7 @@ class StreamFormat {
   final String? vcodec;
   final String? acodec;
   final Uri? url;
+  final Map<String, String> httpHeaders;
 }
 
 class StreamResponse {

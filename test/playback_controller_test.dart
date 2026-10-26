@@ -15,11 +15,13 @@ void main() {
   late PlaybackController playback;
   late List<String> resolutions;
   late List<FakeVideoEngine> videos;
+  late List<Map<String, String>> videoHeaders;
   late int extensions;
   FutureOr<http.Response> Function(String)? resolveOverride;
   setUp(() async {
     resolutions = [];
     videos = [];
+    videoHeaders = [];
     extensions = 0;
     resolveOverride = null;
     mix =
@@ -39,7 +41,8 @@ void main() {
     playback = PlaybackController(
       mix: mix,
       audio: audio,
-      videoFactory: (_) {
+      videoFactory: (_, headers) {
+        videoHeaders.add(headers);
         final video = FakeVideoEngine();
         videos.add(video);
         return video;
@@ -56,12 +59,17 @@ void main() {
     await drain();
     expect(resolutions, ['a', 'b', 'c']);
     expect(audio.entries.map((e) => e.track.videoId), ['a', 'b', 'c']);
+    expect(
+      audio.entries.map((e) => e.httpHeaders['User-Agent']),
+      ['audio-a', 'audio-b', 'audio-c'],
+    );
     expect(playback.isPlaying, isTrue);
     expect(playback.upcomingCount, 2);
     audio.advance(1);
     await drain();
     expect(playback.currentIndex, 1);
     expect(resolutions, ['a', 'b', 'c', 'd']);
+    expect(audio.entries.last.httpHeaders['User-Agent'], 'audio-d');
   });
   test(
     'Prefetch skips failures and preserves the original list index',
@@ -143,6 +151,7 @@ void main() {
       await playback.next();
       expect(resolutions, isEmpty);
       expect(audio.entries, hasLength(1));
+      expect(audio.entries.single.httpHeaders, isEmpty);
       expect(playback.isDirect, isTrue);
       await playback.playDirect('http://media.example.test/test.m4a');
       expect(playback.error, contains('HTTPS'));
@@ -153,6 +162,8 @@ void main() {
     () async {
       await playback.setMode(PlaybackMode.video);
       await playback.playTrack(0);
+      expect(videoHeaders.single['User-Agent'], 'video-a');
+      expect(videoHeaders.single.containsKey('X-API-Key'), isFalse);
       final old = videos.single;
       old.emit(
         const VideoStatus(
@@ -165,10 +176,18 @@ void main() {
       await drain();
       expect(playback.currentIndex, 1);
       expect(resolutions, ['a', 'b']);
+      expect(videoHeaders.last['User-Agent'], 'video-b');
       expect(old.disposed, isTrue);
       expect(audio.loadCount, 0);
     },
   );
+  test('Direct playback does not reuse API media headers', () async {
+    await playback.playTrack(0);
+    await drain();
+    expect(audio.entries.first.httpHeaders, isNotEmpty);
+    await playback.playDirect('https://media.example.test/direct.m4a');
+    expect(audio.entries.single.httpHeaders, isEmpty);
+  });
   test(
     'Background pauses video and changing mode releases resources',
     () async {

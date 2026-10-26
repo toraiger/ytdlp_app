@@ -13,10 +13,16 @@ class AudioStatus {
 }
 
 class QueueEntry {
-  const QueueEntry({required this.track, required this.uri, this.mixIndex});
+  const QueueEntry({
+    required this.track,
+    required this.uri,
+    this.mixIndex,
+    this.httpHeaders = const {},
+  });
   final MixTrack track;
   final Uri uri;
   final int? mixIndex;
+  final Map<String, String> httpHeaders;
 }
 
 abstract interface class AudioEngine {
@@ -35,10 +41,11 @@ abstract interface class AudioEngine {
 }
 
 class JustAudioEngine implements AudioEngine {
-  final AudioPlayer _player = AudioPlayer();
+  final AudioPlayer _player = AudioPlayer(useProxyForRequestHeaders: false);
 
   AudioSource _source(QueueEntry entry) => AudioSource.uri(
     entry.uri,
+    headers: entry.httpHeaders,
     tag: MediaItem(
       id: entry.track.videoId,
       title: entry.track.title,
@@ -118,9 +125,10 @@ abstract interface class VideoEngine {
 }
 
 class NativeVideoEngine implements VideoEngine {
-  NativeVideoEngine(Uri uri)
+  NativeVideoEngine(Uri uri, Map<String, String> httpHeaders)
     : controller = VideoPlayerController.networkUrl(
         uri,
+        httpHeaders: httpHeaders,
         videoPlayerOptions: VideoPlayerOptions(allowBackgroundPlayback: false),
       );
 

@@ -8,7 +8,8 @@ import '../services/api_client.dart';
 import '../services/playback_engines.dart';
 import 'mix_controller.dart';
 
-typedef VideoEngineFactory = VideoEngine Function(Uri uri);
+typedef VideoEngineFactory =
+    VideoEngine Function(Uri uri, Map<String, String> httpHeaders);
 
 class PlaybackController extends ChangeNotifier {
   PlaybackController({
@@ -97,8 +98,8 @@ class PlaybackController extends ChangeNotifier {
       resolve: () async {
         final response = await mix.api.resolveStream(track.videoId);
         return mode == PlaybackMode.audio
-            ? response.audio?.url
-            : response.videoAudio?.url;
+            ? response.audio
+            : response.videoAudio;
       },
     );
   }
@@ -116,14 +117,14 @@ class PlaybackController extends ChangeNotifier {
         title: '直接 URL テスト',
         channel: 'HTTPS stream',
       ),
-      resolve: () async => uri,
+      resolve: () async => StreamFormat(url: uri),
     );
   }
 
   Future<void> _start(
     MixTrack track, {
     int? mixIndex,
-    required Future<Uri?> Function() resolve,
+    required Future<StreamFormat?> Function() resolve,
   }) async {
     final generation = ++_generation;
     final requestedMode = mode;
@@ -144,20 +145,26 @@ class PlaybackController extends ChangeNotifier {
       await _releaseVideo();
       await _mutateAudio(generation, _audio.stop);
       if (!_isCurrent(generation)) return;
-      final uri = await resolve();
+      final media = await resolve();
       if (!_isCurrent(generation)) return;
-      if (uri == null) {
+      final uri = media?.url;
+      if (media == null || uri == null) {
         throw const ApiFailure('この曲に再生可能な HTTPS URL がありません。別の曲をお試しください。');
       }
       if (requestedMode == PlaybackMode.audio) {
-        final entry = QueueEntry(track: track, uri: uri, mixIndex: mixIndex);
+        final entry = QueueEntry(
+          track: track,
+          uri: uri,
+          mixIndex: mixIndex,
+          httpHeaders: media.httpHeaders,
+        );
         _queue.add(entry);
         await _mutateAudio(generation, () => _audio.load(entry));
         if (!_isCurrent(generation)) return;
         _playAudio(generation);
         if (!isDirect) unawaited(_fillQueue(generation));
       } else {
-        final video = _videoFactory(uri);
+        final video = _videoFactory(uri, media.httpHeaders);
         _video = video;
         await video.initialize();
         if (!_isCurrent(generation) || _video != video) return;
@@ -214,9 +221,17 @@ class PlaybackController extends ChangeNotifier {
         try {
           final response = await mix.api.resolveStream(track.videoId);
           if (!_isCurrent(generation)) return;
-          final uri = response.audio?.url;
-          if (uri == null) throw const ApiFailure('先読みした曲に音声 URL がありません。');
-          final entry = QueueEntry(track: track, uri: uri, mixIndex: index);
+          final media = response.audio;
+          final uri = media?.url;
+          if (media == null || uri == null) {
+            throw const ApiFailure('先読みした曲に音声 URL がありません。');
+          }
+          final entry = QueueEntry(
+            track: track,
+            uri: uri,
+            mixIndex: index,
+            httpHeaders: media.httpHeaders,
+          );
           await _mutateAudio(generation, () async {
             await _audio.append(entry);
             if (_isCurrent(generation)) _queue.add(entry);

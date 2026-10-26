@@ -27,8 +27,22 @@ Map<String, dynamic> mixJson(
 Map<String, dynamic> streamJson(String id) => {
   'video_id': id,
   'title': 'Track $id',
-  'audio': {'url': 'https://media.example.test/$id.m4a', 'ext': 'm4a'},
-  'video_audio': {'url': 'https://media.example.test/$id.mp4', 'ext': 'mp4'},
+  'audio': {
+    'url': 'https://media.example.test/$id.m4a',
+    'ext': 'm4a',
+    'http_headers': {
+      'User-Agent': 'audio-$id',
+      'Referer': 'https://youtube.com/',
+    },
+  },
+  'video_audio': {
+    'url': 'https://media.example.test/$id.mp4',
+    'ext': 'mp4',
+    'http_headers': {
+      'User-Agent': 'video-$id',
+      'Referer': 'https://youtube.com/',
+    },
+  },
 };
 http.Response jsonResponse(Object value, {int status = 200}) => http.Response(
   jsonEncode(value),

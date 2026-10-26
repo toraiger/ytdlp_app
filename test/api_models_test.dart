@@ -27,6 +27,35 @@ void main() {
     final model = StreamResponse.fromJson(streamJson('a'));
     expect(model.audio?.url?.path, '/a.m4a');
     expect(model.videoAudio?.url?.path, '/a.mp4');
+    expect(model.audio?.httpHeaders['User-Agent'], 'audio-a');
+    expect(model.videoAudio?.httpHeaders['User-Agent'], 'video-a');
+  });
+  test('Media headers are optional and cannot carry the API key', () {
+    final format = StreamFormat.fromJson({
+      'url': 'https://media.test/a.m4a',
+      'http_headers': {
+        'User-Agent': 'media-agent',
+        'X-API-Key': 'not-a-media-header',
+        'x-api-key': 'also-not-a-media-header',
+      },
+    });
+    expect(format.httpHeaders, {'User-Agent': 'media-agent'});
+    expect(
+      () => format.httpHeaders['User-Agent'] = 'changed',
+      throwsUnsupportedError,
+    );
+    expect(StreamFormat.fromJson({}).httpHeaders, isEmpty);
+    expect(StreamFormat.fromJson({'http_headers': null}).httpHeaders, isEmpty);
+  });
+  test('Malformed media headers are rejected', () {
+    expect(
+      () => StreamFormat.fromJson({'http_headers': ['not-a-map']}),
+      throwsFormatException,
+    );
+    expect(
+      () => StreamFormat.fromJson({'http_headers': {'User-Agent': 42}}),
+      throwsA(isA<TypeError>()),
+    );
   });
   test('UT-03 Merge keeps original order and first copy of video_id', () {
     MixTrack track(String id) => MixTrack.fromJson(trackJson(id));
