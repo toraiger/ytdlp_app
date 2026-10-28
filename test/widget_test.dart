@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mix_player_app/player_app.dart';
@@ -88,6 +90,69 @@ void main() {
     await tester.tap(find.widgetWithText(FilledButton, '再生'));
     await tester.pumpAndSettle();
     expect(find.text('HTTPS の URL を入力してください。'), findsOneWidget);
+  });
+  testWidgets('Automatic audio transition updates title and resets the clock', (
+    tester,
+  ) async {
+    final audio = FakeAudioEngine();
+    final settings =
+        MemorySettings()
+          ..snapshot = const SettingsSnapshot(
+            serverUrl: 'https://api.example.test',
+            apiKey: 'test',
+          );
+    await tester.pumpWidget(
+      PlayerApp(
+        settings: settings,
+        audioEngine: audio,
+        apiFactory:
+            (_, __) => mockApi((request) {
+              if (request.url.path == '/stream') {
+                final id = jsonDecode(request.body)['video_id'] as String;
+                return jsonResponse(streamJson(id));
+              }
+              return jsonResponse({
+                ...mixJson(['a', 'b']),
+                'items': [
+                  {...trackJson('a'), 'duration': 264},
+                  {...trackJson('b'), 'duration': 263},
+                ],
+              });
+            }),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Mix を20曲取得'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Mix を20曲取得'));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.text('Track a'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Track a'));
+    await tester.pumpAndSettle();
+
+    final player = find.ancestor(
+      of: find.byTooltip('次の曲'),
+      matching: find.byType(SafeArea),
+    );
+    audio.durationEvents.add(const Duration(seconds: 264));
+    audio.positionEvents.add(const Duration(seconds: 264));
+    await tester.pump();
+    expect(
+      find.descendant(of: player, matching: find.text('04:24')),
+      findsNWidgets(2),
+    );
+
+    audio.advance(1, duration: const Duration(seconds: 263));
+    await tester.pumpAndSettle();
+
+    for (final text in ['Track b', '00:00', '04:23']) {
+      expect(
+        find.descendant(of: player, matching: find.text(text)),
+        findsOneWidget,
+      );
+    }
+    expect(tester.takeException(), isNull);
   });
   testWidgets('Compact phone layout does not overflow', (tester) async {
     tester.view.physicalSize = const Size(320, 640);

@@ -62,6 +62,12 @@ Future<void> drain() async {
 }
 
 class FakeAudioEngine implements AudioEngine {
+  FakeAudioEngine() {
+    indexEvents.stream.listen((value) => _index = value);
+    positionEvents.stream.listen((value) => _position = value);
+    durationEvents.stream.listen((value) => _duration = value);
+  }
+
   final stateEvents = StreamController<AudioStatus>.broadcast(sync: true);
   final positionEvents = StreamController<Duration>.broadcast(sync: true);
   final durationEvents = StreamController<Duration?>.broadcast(sync: true);
@@ -71,6 +77,13 @@ class FakeAudioEngine implements AudioEngine {
   int loadCount = 0;
   Duration? lastSeek;
   bool playing = false;
+  FutureOr<void> Function(QueueEntry entry)? onAppend;
+  int? _index;
+  Duration _position = Duration.zero;
+  Duration? _duration;
+  @override
+  AudioSnapshot get snapshot =>
+      AudioSnapshot(index: _index, position: _position, duration: _duration);
   @override
   Stream<AudioStatus> get states => stateEvents.stream;
   @override
@@ -84,6 +97,8 @@ class FakeAudioEngine implements AudioEngine {
   @override
   Future<void> load(QueueEntry entry) async {
     loadCount++;
+    _position = Duration.zero;
+    _duration = null;
     entries
       ..clear()
       ..add(entry);
@@ -95,6 +110,8 @@ class FakeAudioEngine implements AudioEngine {
   @override
   Future<void> append(QueueEntry entry) async {
     entries.add(entry);
+    final callback = onAppend;
+    if (callback != null) await callback(entry);
   }
 
   @override
@@ -113,6 +130,9 @@ class FakeAudioEngine implements AudioEngine {
   Future<void> stop() async {
     entries.clear();
     playing = false;
+    _index = null;
+    _position = Duration.zero;
+    _duration = null;
     stateEvents.add(const AudioStatus(false, AudioPhase.idle));
   }
 
@@ -123,7 +143,12 @@ class FakeAudioEngine implements AudioEngine {
     positionEvents.add(position);
   }
 
-  void advance(int index) => indexEvents.add(index);
+  void advance(int index, {Duration? duration}) {
+    _position = Duration.zero;
+    _duration = duration ?? entries[index].track.duration;
+    indexEvents.add(index);
+  }
+
   @override
   Future<void> dispose() async {
     await Future.wait([

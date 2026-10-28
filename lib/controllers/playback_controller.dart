@@ -20,17 +20,9 @@ class PlaybackController extends ChangeNotifier {
        _videoFactory = videoFactory ?? NativeVideoEngine.new {
     _subscriptions.addAll([
       _audio.states.listen(_onAudioState),
-      _audio.positions.listen((value) {
-        if (mode != PlaybackMode.audio || currentTrack == null) return;
-        position = value;
-        _notify();
-      }),
-      _audio.durations.listen((value) {
-        if (mode != PlaybackMode.audio || currentTrack == null) return;
-        duration = value ?? Duration.zero;
-        _notify();
-      }),
-      _audio.indexes.listen(_onAudioIndex),
+      _audio.positions.listen((_) => _syncAudioProgress()),
+      _audio.durations.listen((_) => _syncAudioProgress()),
+      _audio.indexes.listen((_) => _syncAudioProgress()),
       _audio.errors.listen((value) {
         error = value;
         _notify();
@@ -181,6 +173,9 @@ class PlaybackController extends ChangeNotifier {
     } finally {
       if (_isCurrent(generation)) {
         isBusy = false;
+        if (requestedMode == PlaybackMode.audio && error == null) {
+          _syncAudioProgress();
+        }
         _notify();
       }
     }
@@ -234,7 +229,12 @@ class PlaybackController extends ChangeNotifier {
           );
           await _mutateAudio(generation, () async {
             await _audio.append(entry);
-            if (_isCurrent(generation)) _queue.add(entry);
+            if (_isCurrent(generation)) {
+              _queue.add(entry);
+              // A short track may finish while the next source is appended.
+              // Re-read the player after its queue and our queue agree again.
+              _syncAudioProgress();
+            }
           });
           _notify();
         } catch (_) {
@@ -264,19 +264,23 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
-  void _onAudioIndex(int? index) {
-    if (mode != PlaybackMode.audio ||
-        index == null ||
-        index < 0 ||
-        index >= _queue.length) {
+  void _syncAudioProgress() {
+    if (mode != PlaybackMode.audio || isBusy || currentTrack == null) return;
+    final snapshot = _audio.snapshot;
+    final index = snapshot.index;
+    if (index == null || index < 0 || index >= _queue.length) {
       return;
     }
+    final entry = _queue[index];
+    final changed = _queueIndex != index || currentTrack != entry.track;
     _queueIndex = index;
-    currentTrack = _queue[index].track;
-    currentIndex = _queue[index].mixIndex;
-    _completedGeneration = null;
+    currentTrack = entry.track;
+    currentIndex = entry.mixIndex;
+    position = snapshot.position;
+    duration = snapshot.duration ?? Duration.zero;
+    if (changed) _completedGeneration = null;
     _notify();
-    if (!isDirect) unawaited(_fillQueue(_generation));
+    if (changed && !isDirect) unawaited(_fillQueue(_generation));
   }
 
   void _onAudioState(AudioStatus state) {

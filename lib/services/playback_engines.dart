@@ -12,6 +12,18 @@ class AudioStatus {
   final AudioPhase phase;
 }
 
+class AudioSnapshot {
+  const AudioSnapshot({
+    this.index,
+    this.position = Duration.zero,
+    this.duration,
+  });
+
+  final int? index;
+  final Duration position;
+  final Duration? duration;
+}
+
 class QueueEntry {
   const QueueEntry({
     required this.track,
@@ -26,6 +38,7 @@ class QueueEntry {
 }
 
 abstract interface class AudioEngine {
+  AudioSnapshot get snapshot;
   Stream<AudioStatus> get states;
   Stream<Duration> get positions;
   Stream<Duration?> get durations;
@@ -42,6 +55,16 @@ abstract interface class AudioEngine {
 
 class JustAudioEngine implements AudioEngine {
   final AudioPlayer _player = AudioPlayer(useProxyForRequestHeaders: false);
+
+  @override
+  AudioSnapshot get snapshot {
+    final event = _player.playbackEvent;
+    return AudioSnapshot(
+      index: event.currentIndex,
+      position: _player.position,
+      duration: event.duration,
+    );
+  }
 
   AudioSource _source(QueueEntry entry) => AudioSource.uri(
     entry.uri,

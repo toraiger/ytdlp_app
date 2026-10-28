@@ -73,6 +73,55 @@ void main() {
     expect(audio.entries.last.httpHeaders['User-Agent'], 'audio-d');
   });
   test(
+    'Automatic advance during append updates the current track and timing',
+    () async {
+      audio.onAppend = (entry) {
+        if (entry.track.videoId != 'b') return;
+        // The native player can start the new item before append completes.
+        audio.indexEvents.add(1);
+        audio.positionEvents.add(Duration.zero);
+        audio.durationEvents.add(const Duration(seconds: 263));
+      };
+
+      await playback.playTrack(0);
+      await drain();
+
+      expect(playback.currentTrack?.videoId, 'b');
+      expect(playback.currentIndex, 1);
+      expect(playback.position, Duration.zero);
+      expect(playback.duration, const Duration(seconds: 263));
+    },
+  );
+  test(
+    'Automatic advance uses the next tracks own time and duration',
+    () async {
+      await playback.playTrack(0);
+      await drain();
+      audio.durationEvents.add(const Duration(seconds: 264));
+      audio.positionEvents.add(const Duration(seconds: 264));
+
+      audio.advance(1, duration: const Duration(seconds: 263));
+
+      expect(playback.currentTrack?.videoId, 'b');
+      expect(playback.position, Duration.zero);
+      expect(playback.duration, const Duration(seconds: 263));
+    },
+  );
+  test(
+    'Automatic advance resets time when consecutive durations are equal',
+    () async {
+      await playback.playTrack(0);
+      await drain();
+      audio.positionEvents.add(const Duration(seconds: 120));
+
+      audio.advance(1);
+
+      expect(playback.currentTrack?.videoId, 'b');
+      expect(playback.position, Duration.zero);
+      expect(playback.duration, const Duration(seconds: 120));
+    },
+  );
+  test(
     'Prefetch skips failures and preserves the original list index',
     () async {
       resolveOverride =
