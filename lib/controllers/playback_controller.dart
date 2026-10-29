@@ -5,7 +5,6 @@ import 'package:video_player/video_player.dart';
 
 import '../models/api_models.dart';
 import '../services/api_client.dart';
-import '../services/ios_response_delays.dart';
 import '../services/playback_engines.dart';
 import 'mix_controller.dart';
 
@@ -74,14 +73,8 @@ class PlaybackController extends ChangeNotifier {
   }
 
   // Serialize native player mutations; stale API responses cannot modify a new queue.
-  Future<void> _mutateAudio(
-    int generation,
-    Future<void> Function() action, {
-    bool waitBeforeLoading = false,
-  }) {
+  Future<void> _mutateAudio(int generation, Future<void> Function() action) {
     final operation = _audioTail.then((_) async {
-      if (!_isCurrent(generation)) return;
-      if (waitBeforeLoading) await delayMediaLoad();
       if (_isCurrent(generation)) await action();
     });
     _audioTail = operation.catchError((Object _) {});
@@ -204,17 +197,11 @@ class PlaybackController extends ChangeNotifier {
           httpHeaders: media.httpHeaders,
         );
         _queue.add(entry);
-        await _mutateAudio(
-          generation,
-          () => _audio.load(entry),
-          waitBeforeLoading: true,
-        );
+        await _mutateAudio(generation, () => _audio.load(entry));
         if (!_isCurrent(generation)) return;
         _playAudio(generation);
         if (!isDirect) unawaited(_fillQueue(generation));
       } else {
-        await delayMediaLoad();
-        if (!_isCurrent(generation)) return;
         final video = _videoFactory(uri, media.httpHeaders);
         _video = video;
         await video.initialize();
@@ -388,7 +375,7 @@ class PlaybackController extends ChangeNotifier {
               // Re-read the player after its queue and our queue agree again.
               _syncAudioProgress();
             }
-          }, waitBeforeLoading: true);
+          });
           _notify();
         } catch (_) {
           if (!_isCurrent(generation)) return;
@@ -468,7 +455,7 @@ class PlaybackController extends ChangeNotifier {
         _queueIndex = 0;
         _nextCandidate = 1;
         await _audio.load(_queue.single);
-      }, waitBeforeLoading: true);
+      });
       if (!_isCurrent(generation)) return false;
       unawaited(_prepareUpcomingUrls(generation, api));
       return true;

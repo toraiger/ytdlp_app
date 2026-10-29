@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 from playwright.sync_api import sync_playwright, expect
 
@@ -88,6 +89,12 @@ with sync_playwright() as p:
         page.get_by_role("button",name="停止",exact=True).click()
         expect(page.get_by_text("再生する曲を選択",exact=False)).to_be_visible()
         print("Audio transport verified.")
+        page.get_by_role("button",name="API サーバー設定",exact=True).click()
+        expect(page.get_by_text("直近の API 通信時間",exact=False)).to_be_visible()
+        expect(page.get_by_text(re.compile(r"(Mix取得|再生URL取得|曲の追加取得): [0-9]+\.[0-9]{3}秒"))).to_be_visible()
+        expect(page.get_by_text("サーバーの処理時間を含みます。",exact=False)).to_be_visible()
+        page.get_by_role("button",name="キャンセル",exact=True).click()
+        print("Measured API request time is visible in settings.")
         page.get_by_role("radio",name="動画＋音声",exact=True).click()
         page.get_by_role("button",name="1 夜の余白 Mix Player テスト音源 00:12",exact=True).click()
         expect(page.locator("video")).to_have_count(1,timeout=15000)

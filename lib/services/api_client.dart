@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 
 import '../models/api_models.dart';
-import 'ios_response_delays.dart';
+import '../models/api_timing.dart';
+import 'api_http_client.dart';
 
 class ApiFailure implements Exception {
   const ApiFailure(this.message, {this.statusCode});
@@ -25,7 +27,7 @@ class ApiClient {
     DateTime Function()? now,
   }) : baseUri = validateServerUrl(serverUrl),
        _apiKey = apiKey.trim(),
-       _client = client ?? http.Client(),
+       _client = client ?? createApiHttpClient(),
        _now = now ?? DateTime.now;
 
   static Uri validateServerUrl(String input) {
@@ -47,6 +49,7 @@ class ApiClient {
   final String _apiKey;
   final http.Client _client;
   final Duration timeout;
+  final lastTiming = ValueNotifier<ApiTiming?>(null);
   final DateTime Function() _now;
   final _streams = <String, _CachedStream>{};
   final _resolving = <String, Future<StreamResponse>>{};
@@ -149,6 +152,10 @@ class ApiClient {
     List<String> path,
     Map<String, dynamic> body,
   ) async {
+    final watch = Stopwatch()..start();
+    Duration? toHeaders;
+    int? statusCode;
+    var succeeded = false;
     final uri = baseUri.replace(
       pathSegments: [
         ...baseUri.pathSegments.where((segment) => segment.isNotEmpty),
@@ -167,9 +174,9 @@ class ApiClient {
     try {
       final response = await (() async {
         final streamed = await _client.send(request);
-        final response = await http.Response.fromStream(streamed);
-        await delayApiResponse();
-        return response;
+        toHeaders = watch.elapsed;
+        statusCode = streamed.statusCode;
+        return http.Response.fromStream(streamed);
       })().timeout(timeout);
       if (response.statusCode < 200 || response.statusCode >= 300) {
         final status = response.statusCode;
@@ -178,21 +185,41 @@ class ApiClient {
           statusCode: status,
         );
       }
-      return jsonObject(jsonDecode(utf8.decode(response.bodyBytes)));
+      final data = jsonObject(jsonDecode(utf8.decode(response.bodyBytes)));
+      succeeded = true;
+      return data;
     } on TimeoutException {
       throw const ApiFailure('API の応答がタイムアウトしました。しばらくしてから再度お試しください。');
     } on http.ClientException {
       throw const ApiFailure('API サーバーに接続できません。URL とネットワークを確認してください。');
     } on FormatException {
       throw const ApiFailure('API から正しい JSON が返されませんでした。');
+    } finally {
+      watch.stop();
+      if (!_closed) {
+        lastTiming.value = ApiTiming(
+          operation:
+              path.last == 'extend'
+                  ? ApiOperation.extend
+                  : path.first == 'stream'
+                  ? ApiOperation.stream
+                  : ApiOperation.mix,
+          total: watch.elapsed,
+          succeeded: succeeded,
+          toHeaders: toHeaders,
+          statusCode: statusCode,
+        );
+      }
     }
   }
 
   void close() {
+    if (_closed) return;
     _closed = true;
     _streams.clear();
     _resolving.clear();
     _client.close();
+    lastTiming.dispose();
   }
 }
 

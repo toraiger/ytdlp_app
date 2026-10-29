@@ -36,7 +36,8 @@ Flutter内では`MixController`がセッションと楽曲一覧を管理し、`
 | UI | lib/player_app.dart | URL input, track list, dialogs, seek, controls, video panel |
 | Mix state | lib/controllers/mix_controller.dart | Load, deduplicate, extend session |
 | Playback state | lib/controllers/playback_controller.dart | Audio playlist, video playback, direct URL |
-| API | lib/services/api_client.dart | HTTPS POST, X-API-Key, 90-second timeout |
+| API | lib/services/api_client.dart | HTTPS POST, X-API-Key, 90-second timeout, request timing |
+| API transport | lib/services/api_http_client.dart | URLSession on iPhone; conditional imports for other platforms |
 | Models | lib/models/api_models.dart | Decode playlist and stream JSON |
 | Persistence | lib/services/app_settings.dart | Keychain / SharedPreferencesAsync |
 
@@ -155,7 +156,9 @@ X-API-Key: <key>
 
 `/stream` の結果はAPIクライアントごとに最大16曲・5分だけメモリに保持し、同じ曲の処理中のリクエストは共有します。URLに `expire` がある場合は30秒前から再利用しません。再利用した音声の失敗時は1回だけURLを再取得し、新しく取得したURLでも失敗した場合はエラーを表示します。APIのJSON契約とサーバー側の変更は不要です。
 
-`feat/ios-response-delays` ブランチのiOSネイティブ版では、実通信によるAPI応答の受信後に1秒、新規の音声読み込み・キュー追加・動画初期化の前に0.4秒の固定待ち時間を追加します。先頭曲の事前準備や先読みにも適用し、キャッシュ・キューの再利用は準備済みの結果を使います。API応答後の待ち時間も既存の90秒のタイムアウトに含めます。待機後に停止・別曲選択を再確認し、古い世代の読み込みを開始しません。iOSのリリースビルドでも有効です。
+`perf/api-communication` では、意図的な待ち時間を設けず、iPhoneのAPI通信にURLSessionを使います。同じAPIクライアントのセッションを使い回し、対応サーバーではHTTP/2を自動交渉します。ネイティブHTTPキャッシュを使わず、APIレスポンスとCookieをディスクに保存しません。HTTPリダイレクト禁止とHTTPSの検証を維持します。
+
+設定画面には直近に完了した実API通信の所要時間を表示します。計測はサーバー処理と応答受信を含み、メディア本体の読み込みは含みません。保持するのは処理種別・所要時間・HTTPステータス・成功可否で、APIキー・URL・動画ID・セッションID・本文は含めません。キャッシュ再利用では計測値を更新しません。
 
 - 再生URLには有効期限があります。先読み時点で有効でも再生時に失効する場合があります。
 - iOSがバックグラウンドでDart処理の実行を制限すると、API呼び出しやキュー補充が止まることがあります。
