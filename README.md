@@ -8,6 +8,7 @@
 
 - HTTPS API URL と X-API-Key の設定。API キーは iOS Keychain / Android の安全なストレージに保存します。
 - YouTube Mix の20曲取得、サムネイル・タイトル・チャンネル・長さの表示。
+- Mix取得後に先頭1曲のURLだけを準備し、タップ時に取得中・取得済みの結果を再利用。自動再生はしません。
 - 手動・末尾での追加取得と、video_id による重複排除。
 - 音声の連続再生。現在の曲と次の2曲分を解決し、曲が切り替わると先読みを補充します。
 - フォアグラウンドの動画＋音声再生。
@@ -81,18 +82,21 @@ GitHub Actions の Flutter checks でも両方をビルドします。GitHub に
 | --- | --- | --- |
 | POST /mix | url, count=20 | session_id, playlist_title, items |
 | POST /mix/{session_id}/extend | count=20 | session_id, items |
-| POST /stream | video_id | audio.url, video_audio.url |
+| POST /stream | video_id, include_formats=false | audio.url, video_audio.url |
 
 `audio.http_headers` と `video_audio.http_headers` は、それぞれの再生 URL に付けるメディア用 HTTP ヘッダーです。現在の曲・音声の先読み・動画再生で維持します。API 認証の `X-API-Key` はメディア配信先に送りません。音声は just_audio のネイティブヘッダー実装を使うため、ローカル HTTP プロキシ用の通信許可は不要です。
 
 各 POST に Content-Type、Accept、X-API-Key を付与し、90秒でタイムアウトします。API のベース URL は HTTPS のみで、認証情報・クエリ・フラグメントを拒否します。API リダイレクトを自動追跡せず、鍵を別の接続先へ転送しません。期限付きメディア URL とセッション ID はメモリ上だけで保持します。
+
+<!-- URL準備の寿命はプレーヤーや再生中キューの寿命とは別。再生エラーの自動復旧ではない。 -->
+先頭曲の準備結果は取得完了から最大60秒、URLにUnix秒の `expire` / `expires` クエリまたは `/expire/秒数/` があればその30秒前まで再利用します。停止・Mix再取得・API設定変更で破棄し、準備失敗は表示せず次のタップで通常取得します。`include_formats=false` は全形式一覧を省く指定で、旧APIでは無視されます。
 
 ### Raspberry Pi / Tailscale API で確認する
 
 1. iPhone の Tailscale をオンにし、Safari から API の `/health` に接続できることを確認します。
 2. アプリ右上の「API サーバー設定」で、`https://pi.xxxxx.ts.net` のようなベース URL と API キーを保存します。URL の末尾に `/health` や `/stream` は付けません。
 3. YouTube Mix URL を入力し、「Mix を20曲取得」をタップします。「音声のみ」を選び、曲をタップして再生します。
-4. 「動画＋音声」に切り替え、曲を選び直して動画も確認します。再生の都度 API で URL を解決し、対応するヘッダーを渡します。
+4. 「動画＋音声」に切り替え、曲を選び直して動画も確認します。準備済みの先頭曲以外や期限切れの場合は API で URL を解決し、対応するヘッダーを渡します。
 5. まずラズパイと同じ Wi-Fi で確認し、その後 iPhone をモバイル回線へ切り替えて確認します。回線切り替え後は曲を選び直してください。
 
 API の JSON 取得と、iPhone からメディア配信元へのアクセスは別の通信です。ラズパイで取得した URL であっても、メディア本体は iPhone から直接取得します。配信元の IP 制約や有効期限による再生失敗は、実機で切り分けます。

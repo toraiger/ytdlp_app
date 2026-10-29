@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../models/api_models.dart';
+import 'startup_timing.dart';
 
 class ApiFailure implements Exception {
   const ApiFailure(this.message, {this.statusCode});
@@ -45,22 +46,30 @@ class ApiClient {
   final http.Client _client;
   final Duration timeout;
 
-  Future<MixResponse> fetchMix(String url, {int count = 20}) async =>
-      _decodeMix(await _post(['mix'], {'url': url, 'count': count}));
+  // Mixの応答時間をURL取得・プレーヤー読み込みの時間と分けて計測する。
+  Future<MixResponse> fetchMix(String url, {int count = 20}) => measureStartup(
+    'mix_response',
+    () async => _decodeMix(await _post(['mix'], {'url': url, 'count': count})),
+  );
 
   Future<MixResponse> extendMix(String sessionId, {int count = 20}) async =>
       _decodeMix(await _post(['mix', sessionId, 'extend'], {'count': count}));
 
-  Future<StreamResponse> resolveStream(String videoId) async {
-    final json = await _post(['stream'], {'video_id': videoId});
-    try {
-      return StreamResponse.fromJson(json);
-    } on FormatException {
-      throw const ApiFailure('再生 URL の応答形式が正しくありません。');
-    } on TypeError {
-      throw const ApiFailure('再生 URL の応答形式が正しくありません。');
-    }
-  }
+  // 旧サーバーは未知のフィールドを無視するため、同じ要求で後方互換を保つ。
+  Future<StreamResponse> resolveStream(String videoId) =>
+      measureStartup('stream_response', () async {
+        final json = await _post(
+          ['stream'],
+          {'video_id': videoId, 'include_formats': false},
+        );
+        try {
+          return StreamResponse.fromJson(json);
+        } on FormatException {
+          throw const ApiFailure('再生 URL の応答形式が正しくありません。');
+        } on TypeError {
+          throw const ApiFailure('再生 URL の応答形式が正しくありません。');
+        }
+      });
 
   MixResponse _decodeMix(Map<String, dynamic> json) {
     try {

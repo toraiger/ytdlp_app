@@ -20,6 +20,9 @@ class MixController extends ChangeNotifier {
   DateTime? get expiresAt => _session?.expiresAt;
   bool get isConfigured => _api != null;
 
+  /// 設定変更とMix再取得を識別する世代。追加取得では変わらず、URL準備の失効に使う。
+  int get revision => _generation;
+
   ApiClient get api => _api ?? (throw const ApiFailure('API サーバー設定を保存してください。'));
 
   void configure(ApiClient client) {

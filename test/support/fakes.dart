@@ -78,6 +78,8 @@ class FakeAudioEngine implements AudioEngine {
   Duration? lastSeek;
   bool playing = false;
   FutureOr<void> Function(QueueEntry entry)? onAppend;
+  // 終了処理の遅延・失敗を再現し、API取得との並行性を検証するためのフック。
+  FutureOr<void> Function()? onStop;
   int? _index;
   Duration _position = Duration.zero;
   Duration? _duration;
@@ -128,6 +130,8 @@ class FakeAudioEngine implements AudioEngine {
 
   @override
   Future<void> stop() async {
+    final callback = onStop;
+    if (callback != null) await callback();
     entries.clear();
     playing = false;
     _index = null;
@@ -168,6 +172,8 @@ class FakeVideoEngine implements VideoEngine {
   VideoStatus value = const VideoStatus();
   final listeners = <void Function()>[];
   bool disposed = false;
+  // 動画の解放完了前に次のネイティブプレーヤーを作らないことを検証する。
+  FutureOr<void> Function()? onDispose;
   @override
   void addListener(void Function() listener) => listeners.add(listener);
   @override
@@ -218,6 +224,8 @@ class FakeVideoEngine implements VideoEngine {
 
   @override
   Future<void> dispose() async {
+    final callback = onDispose;
+    if (callback != null) await callback();
     disposed = true;
   }
 }

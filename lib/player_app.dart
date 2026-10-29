@@ -159,7 +159,9 @@ class _PlayerScreenState extends State<_PlayerScreen>
     FocusManager.instance.primaryFocus?.unfocus();
     await _playback.stop();
     final loaded = await _mix.load(_url.text);
-    if (loaded) {
+    if (loaded && mounted) {
+      // 一覧の表示や設定保存を待たせずURLだけ準備する。音は曲タップまで出さない。
+      _playback.prepareFirstTrack();
       try {
         await widget.settings.saveLastMix(_url.text.trim());
       } catch (_) {

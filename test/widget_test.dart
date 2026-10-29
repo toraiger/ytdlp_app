@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
 import 'package:mix_player_app/player_app.dart';
 import 'package:mix_player_app/services/app_settings.dart';
 import 'support/fakes.dart';
@@ -91,6 +93,54 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('HTTPS の URL を入力してください。'), findsOneWidget);
   });
+  // URL準備を待つpumpAndSettleは使わず、要求が未完了でも一覧が表示されることを確認する。
+  testWidgets(
+    'Mix list stays usable while first URL is prepared without autoplay',
+    (tester) async {
+      final response = Completer<http.Response>();
+      final audio = FakeAudioEngine();
+      final requests = <String>[];
+      final settings =
+          MemorySettings()
+            ..snapshot = const SettingsSnapshot(
+              serverUrl: 'https://api.example.test',
+              apiKey: 'test',
+            );
+      await tester.pumpWidget(
+        PlayerApp(
+          settings: settings,
+          audioEngine: audio,
+          apiFactory:
+              (_, __) => mockApi((request) {
+                if (request.url.path == '/stream') {
+                  requests.add(jsonDecode(request.body)['video_id'] as String);
+                  return response.future;
+                }
+                return jsonResponse(mixJson(['a']));
+              }),
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Mix を20曲取得'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Mix を20曲取得'));
+      await tester.pumpAndSettle();
+      expect(find.text('Track a'), findsOneWidget);
+      expect(settings.savedMix, defaultMixUrl);
+      expect(requests, ['a']);
+      expect(audio.loadCount, 0);
+      await tester.ensureVisible(find.text('Track a'));
+      await tester.tap(find.text('Track a'));
+      await tester.pump();
+      expect(requests, ['a']);
+      expect(audio.playing, isFalse);
+      response.complete(jsonResponse(streamJson('a')));
+      await tester.pumpAndSettle();
+      expect(audio.playing, isTrue);
+      expect(requests, ['a']);
+      expect(tester.takeException(), isNull);
+    },
+  );
   testWidgets('Automatic audio transition updates title and resets the clock', (
     tester,
   ) async {

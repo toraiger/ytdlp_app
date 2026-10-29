@@ -149,6 +149,9 @@ X-API-Key: <key>
 
 ## 8. 連続再生・キュー制御
 
+<!-- URL準備と再生を分離し、Mix表示をURL取得やメディア読み込みで待たせない。 -->
+Mix取得成功後は先頭1曲の `/stream` を非同期に開始します。タップ時に同じ実行中要求または有効な結果を使い、準備だけではネイティブプレーヤーを読み込んだり再生したりしません。保持期限は取得完了から60秒と明示URL期限の30秒前の早い方です。停止・Mix再取得・API設定変更で破棄し、失敗・失効時はタップ時に通常取得します。
+
 音声の場合、開始曲のURLを取得した後、**次の2曲分**を `/stream` から順に取得してキューに追加します。再生曲が切り替わるとさらに補充を試みます。Mixの末尾へ到達すると `/extend` を一度試行します。
 
 - 再生URLには有効期限があります。先読み時点で有効でも再生時に失効する場合があります。
@@ -159,9 +162,10 @@ X-API-Key: <key>
 - ユーザーがアプリを強制終了した後、OSの制限を超えて自動再生することはできません。
 
 ```text
-Select track -> POST /stream -> audio.url or video_audio.url
+Mix loaded -> prepare first track URL (no autoplay)
+Select track -> reuse preparation or POST /stream; release old player in parallel
 Audio: start now -> resolve next 2 -> append -> refill on index change
-Video: resolve next only at transition -> dispose old controller
+Video: resolve next at transition; wait for old controller disposal before initialization
 Queue tail: call /mix/{session_id}/extend (once per unchanged length)
 ```
 

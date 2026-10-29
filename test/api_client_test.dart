@@ -58,15 +58,22 @@ void main() {
     addTearDown(api.close);
     await api.extendMix('session/unsafe');
   });
-  test('Stream request sends video_id only', () async {
-    final api = mockApi((request) {
-      expect(request.url.path, '/stream');
-      expect(jsonDecode(request.body), {'video_id': 'a'});
-      return jsonResponse(streamJson('a'));
-    });
-    addTearDown(api.close);
-    expect((await api.resolveStream('a')).audio?.url, isNotNull);
-  });
+  // 旧サーバー相当の全形式付き応答も、新サーバーの軽量応答も同じモデルで読む。
+  test(
+    'Stream request opts out of formats and accepts legacy response',
+    () async {
+      final api = mockApi((request) {
+        expect(request.url.path, '/stream');
+        expect(jsonDecode(request.body), {
+          'video_id': 'a',
+          'include_formats': false,
+        });
+        return jsonResponse({...streamJson('a'), 'formats': []});
+      });
+      addTearDown(api.close);
+      expect((await api.resolveStream('a')).audio?.url, isNotNull);
+    },
+  );
   test('HTTP errors preserve status and never expose response body', () async {
     final api = mockApi((_) => http.Response('private-key signed-url', 403));
     addTearDown(api.close);
