@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 
 import '../models/api_models.dart';
+import 'ios_response_delays.dart';
 
 class ApiFailure implements Exception {
   const ApiFailure(this.message, {this.statusCode});
@@ -166,7 +167,9 @@ class ApiClient {
     try {
       final response = await (() async {
         final streamed = await _client.send(request);
-        return http.Response.fromStream(streamed);
+        final response = await http.Response.fromStream(streamed);
+        await delayApiResponse();
+        return response;
       })().timeout(timeout);
       if (response.statusCode < 200 || response.statusCode >= 300) {
         final status = response.statusCode;
