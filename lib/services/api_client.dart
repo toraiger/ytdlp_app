@@ -21,9 +21,11 @@ class ApiClient {
     required String apiKey,
     http.Client? client,
     this.timeout = const Duration(seconds: 90),
+    DateTime Function()? now,
   }) : baseUri = validateServerUrl(serverUrl),
        _apiKey = apiKey.trim(),
-       _client = client ?? http.Client();
+       _client = client ?? http.Client(),
+       _now = now ?? DateTime.now;
 
   static Uri validateServerUrl(String input) {
     final uri = Uri.tryParse(input.trim());
@@ -44,6 +46,46 @@ class ApiClient {
   final String _apiKey;
   final http.Client _client;
   final Duration timeout;
+  final DateTime Function() _now;
+  final _streams = <String, _CachedStream>{};
+  final _resolving = <String, Future<StreamResponse>>{};
+  bool _closed = false;
+
+  StreamFormat? cachedMedia(String videoId, PlaybackMode mode) {
+    final cached = _cachedStream(videoId, mode);
+    return mode == PlaybackMode.audio
+        ? cached?.response.audio
+        : cached?.response.videoAudio;
+  }
+
+  _CachedStream? _cachedStream(String videoId, PlaybackMode mode) {
+    final cached = _streams[videoId];
+    if (cached == null) return null;
+    final age = _now().difference(cached.resolvedAt);
+    if (age.isNegative || age >= const Duration(minutes: 5)) {
+      _streams.remove(videoId);
+      return null;
+    }
+    final media =
+        mode == PlaybackMode.audio
+            ? cached.response.audio
+            : cached.response.videoAudio;
+    final uri = media?.url;
+    if (uri == null) return null;
+    // YouTube URLs expose their Unix expiry as `expire`. Keep a safety margin;
+    // URLs without it still have the short local retention limit above.
+    final expiry = int.tryParse(uri.queryParameters['expire'] ?? '');
+    if (expiry != null &&
+        expiry * 1000 <=
+            _now().add(const Duration(seconds: 30)).millisecondsSinceEpoch) {
+      return null;
+    }
+    _streams.remove(videoId);
+    _streams[videoId] = cached;
+    return cached;
+  }
+
+  void invalidateStream(String videoId) => _streams.remove(videoId);
 
   Future<MixResponse> fetchMix(String url, {int count = 20}) async =>
       _decodeMix(await _post(['mix'], {'url': url, 'count': count}));
@@ -51,7 +93,37 @@ class ApiClient {
   Future<MixResponse> extendMix(String sessionId, {int count = 20}) async =>
       _decodeMix(await _post(['mix', sessionId, 'extend'], {'count': count}));
 
-  Future<StreamResponse> resolveStream(String videoId) async {
+  Future<StreamResponse> resolveStream(
+    String videoId, {
+    PlaybackMode mode = PlaybackMode.audio,
+    bool refresh = false,
+  }) {
+    if (refresh) {
+      invalidateStream(videoId);
+    } else {
+      final cached = _cachedStream(videoId, mode);
+      if (cached != null) return Future.value(cached.response);
+    }
+    return _resolving[videoId] ??= _resolveStream(videoId);
+  }
+
+  Future<StreamResponse> _resolveStream(String videoId) async {
+    try {
+      final response = await _fetchStream(videoId);
+      if (!_closed) {
+        _streams.remove(videoId);
+        _streams[videoId] = _CachedStream(response, _now());
+        while (_streams.length > 16) {
+          _streams.remove(_streams.keys.first);
+        }
+      }
+      return response;
+    } finally {
+      unawaited(_resolving.remove(videoId));
+    }
+  }
+
+  Future<StreamResponse> _fetchStream(String videoId) async {
     final json = await _post(['stream'], {'video_id': videoId});
     try {
       return StreamResponse.fromJson(json);
@@ -113,5 +185,16 @@ class ApiClient {
     }
   }
 
-  void close() => _client.close();
+  void close() {
+    _closed = true;
+    _streams.clear();
+    _resolving.clear();
+    _client.close();
+  }
+}
+
+class _CachedStream {
+  const _CachedStream(this.response, this.resolvedAt);
+  final StreamResponse response;
+  final DateTime resolvedAt;
 }

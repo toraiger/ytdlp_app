@@ -149,7 +149,11 @@ X-API-Key: <key>
 
 ## 8. 連続再生・キュー制御
 
-音声の場合、開始曲のURLを取得した後、**次の2曲分**を `/stream` から順に取得してキューに追加します。再生曲が切り替わるとさらに補充を試みます。Mixの末尾へ到達すると `/extend` を一度試行します。
+音声の場合、一覧の取得後に先頭曲のURL取得とプレーヤーへの読み込みを先に行います。音声はタップされるまで再生しません。準備中に先頭曲をタップした場合は同じ処理の完了を待ち、URL取得や読み込みを重複させません。別の曲を選択した場合や停止した場合は、古い準備から再生を開始しません。
+
+先頭曲の準備ができたら次の2曲分のURLを取得し、再生開始後にキューへ追加します。音声は現在の曲から**次の2曲分**までを補充し、一覧からの選択と前後移動でも、有効なURL・ヘッダーを持つキューを再利用します。Mixの末尾へ到達すると `/extend` を一度試行します。
+
+`/stream` の結果はAPIクライアントごとに最大16曲・5分だけメモリに保持し、同じ曲の処理中のリクエストは共有します。URLに `expire` がある場合は30秒前から再利用しません。再利用した音声の失敗時は1回だけURLを再取得し、新しく取得したURLでも失敗した場合はエラーを表示します。APIのJSON契約とサーバー側の変更は不要です。
 
 - 再生URLには有効期限があります。先読み時点で有効でも再生時に失効する場合があります。
 - iOSがバックグラウンドでDart処理の実行を制限すると、API呼び出しやキュー補充が止まることがあります。
@@ -159,17 +163,19 @@ X-API-Key: <key>
 - ユーザーがアプリを強制終了した後、OSの制限を超えて自動再生することはできません。
 
 ```text
-Select track -> POST /stream -> audio.url or video_audio.url
-Audio: start now -> resolve next 2 -> append -> refill on index change
+Mix loaded -> resolve first audio -> load without playing -> prepare next 2 URLs
+Select first track -> reuse preparation -> play -> append next 2
+Select queued track -> seek to queued source -> play
+Select uncached track -> POST /stream -> audio.url or video_audio.url
 Video: resolve next only at transition -> dispose old controller
 Queue tail: call /mix/{session_id}/extend (once per unchanged length)
 ```
 
 | Condition | Current behavior | Limitation |
 | --- | --- | --- |
-| Audio start | Resolve selected track; play; fill to 3 queued items | No bulk prefetch of entire Mix |
-| Audio next | SeekToNext when available, otherwise rebuild | Refresh not guaranteed |
-| Audio previous | At 3s or later restart same track; otherwise previous | At playlist head restart |
+| Audio start | Prepare first source after Mix load; reuse it when tapped | Immediate taps wait for remaining API/media preparation |
+| Audio next / list tap | Seek to a reusable queued source; otherwise resolve/load | Five-minute local retention and signed URL expiry apply |
+| Audio previous | At 3s or later restart same track; otherwise reuse previous if available | At playlist head restart |
 | Queue resolution error | Report error; skip the failed track | Retry is not implemented |
 | Video end | Trigger next() after completion | Background continuous video excluded |
 | Manual extend | Update controller track list; do not reset if growing | Server may return no new tracks |
@@ -199,7 +205,7 @@ Queue tail: call /mix/{session_id}/extend (once per unchanged length)
 | Invalid JSON | Report invalid JSON | Telemetry and redaction |
 | No tracks | Raise load failure | Offer fresh Mix request |
 | Audio URL missing | Fail start or skip prefetched track | Alternate format selection |
-| Media playback failure | Display player error | Re-resolve via /stream |
+| Media playback failure | Refresh reused audio once; surface errors from fresh sources | Real-device and network-change validation |
 | Extend failure | Save error and prevent loop at same size | Explicit retry UX |
 | Session expiry | No automatic recreation | Re-create playlist and reposition |
 | iOS background limit | Plugin + iOS audio mode configured | Long-duration device validation |

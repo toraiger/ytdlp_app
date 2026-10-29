@@ -17,6 +17,7 @@ void main() {
   late List<FakeVideoEngine> videos;
   late List<Map<String, String>> videoHeaders;
   late int extensions;
+  late DateTime now;
   FutureOr<http.Response> Function(String)? resolveOverride;
   setUp(() async {
     resolutions = [];
@@ -24,6 +25,7 @@ void main() {
     videoHeaders = [];
     extensions = 0;
     resolveOverride = null;
+    now = DateTime.utc(2026, 10, 29);
     mix =
         MixController()..configure(
           mockApi((request) {
@@ -34,7 +36,7 @@ void main() {
             }
             if (request.url.path.endsWith('extend')) extensions++;
             return jsonResponse(mixJson(['a', 'b', 'c', 'd', 'e']));
-          }),
+          }, now: () => now),
         );
     await mix.load(defaultMixUrl);
     audio = FakeAudioEngine();
@@ -71,6 +73,212 @@ void main() {
     expect(playback.currentIndex, 1);
     expect(resolutions, ['a', 'b', 'c', 'd']);
     expect(audio.entries.last.httpHeaders['User-Agent'], 'audio-d');
+  });
+  test('Mix load prepares the first audio source without autoplay', () async {
+    await mix.load(defaultMixUrl);
+    await drain();
+    expect(resolutions, ['a', 'b', 'c']);
+    expect(audio.loadCount, 1);
+    expect(audio.playing, isFalse);
+    expect(playback.currentTrack, isNull);
+    expect(playback.isBusy, isFalse);
+
+    await playback.playTrack(0);
+    await drain();
+    expect(audio.loadCount, 1);
+    expect(audio.stopCount, 0);
+    expect(audio.entries.map((entry) => entry.track.videoId), ['a', 'b', 'c']);
+    expect(resolutions, ['a', 'b', 'c']);
+    expect(playback.currentIndex, 0);
+    expect(playback.isPlaying, isTrue);
+  });
+  test(
+    'First tap shares the URL request already started by Mix load',
+    () async {
+      final delayed = Completer<http.Response>();
+      resolveOverride =
+          (id) => id == 'a' ? delayed.future : jsonResponse(streamJson(id));
+      await mix.load(defaultMixUrl);
+      await drain();
+      final playing = playback.playTrack(0);
+      await drain();
+      expect(resolutions, ['a']);
+      expect(playback.isResolvingUrl, isTrue);
+      expect(audio.playing, isFalse);
+      delayed.complete(jsonResponse(streamJson('a')));
+      await playing;
+      await drain();
+      expect(resolutions.where((id) => id == 'a'), hasLength(1));
+      expect(audio.loadCount, 1);
+      expect(audio.playing, isTrue);
+    },
+  );
+  test(
+    'First tap waits for the existing media load instead of loading twice',
+    () async {
+      final loaded = Completer<void>();
+      audio.onLoad = (_) => loaded.future;
+      await mix.load(defaultMixUrl);
+      await drain();
+      expect(audio.loadCount, 1);
+      expect(audio.playing, isFalse);
+      final playing = playback.playTrack(0);
+      await drain();
+      expect(playback.isBusy, isTrue);
+      expect(playback.isResolvingUrl, isFalse);
+      loaded.complete();
+      await playing;
+      await drain();
+      expect(audio.loadCount, 1);
+      expect(audio.playing, isTrue);
+    },
+  );
+  test('First playback does not wait for the next tracks URL', () async {
+    final delayed = Completer<http.Response>();
+    resolveOverride =
+        (id) => id == 'b' ? delayed.future : jsonResponse(streamJson(id));
+    await mix.load(defaultMixUrl);
+    await drain();
+    await playback.playTrack(0);
+    expect(audio.playing, isTrue);
+    expect(playback.isBusy, isFalse);
+    expect(audio.loadCount, 1);
+    delayed.complete(jsonResponse(streamJson('b')));
+    await drain();
+  });
+  test(
+    'Selecting another track invalidates pending first-track preparation',
+    () async {
+      final delayed = Completer<http.Response>();
+      resolveOverride =
+          (id) => id == 'a' ? delayed.future : jsonResponse(streamJson(id));
+      await mix.load(defaultMixUrl);
+      await drain();
+      await playback.playTrack(2);
+      delayed.complete(jsonResponse(streamJson('a')));
+      await drain();
+      expect(playback.currentTrack?.videoId, 'c');
+      expect(audio.entries.first.track.videoId, 'c');
+      expect(audio.loadCount, 1);
+    },
+  );
+  test('Stop during first-track loading prevents delayed autoplay', () async {
+    final loaded = Completer<void>();
+    audio.onLoad = (_) => loaded.future;
+    await mix.load(defaultMixUrl);
+    await drain();
+    final playing = playback.playTrack(0);
+    await drain();
+    final stopping = playback.stop();
+    loaded.complete();
+    await Future.wait([playing, stopping]);
+    await drain();
+    expect(playback.currentTrack, isNull);
+    expect(audio.playing, isFalse);
+    expect(audio.entries, isEmpty);
+  });
+  test('A failed first-track preparation is retried when tapped', () async {
+    var failed = false;
+    resolveOverride = (id) {
+      if (id == 'a' && !failed) {
+        failed = true;
+        return http.Response('', 503);
+      }
+      return jsonResponse(streamJson(id));
+    };
+    await mix.load(defaultMixUrl);
+    await drain();
+    expect(playback.error, isNull);
+    expect(audio.playing, isFalse);
+    await playback.playTrack(0);
+    await drain();
+    expect(resolutions.where((id) => id == 'a'), hasLength(2));
+    expect(audio.playing, isTrue);
+  });
+  test(
+    'List taps and previous reuse the loaded queue and reset time',
+    () async {
+      await playback.playTrack(0);
+      await drain();
+      await playback.playTrack(1);
+      await drain();
+      expect(audio.loadCount, 1);
+      expect(resolutions.where((id) => id == 'b'), hasLength(1));
+      expect(playback.currentIndex, 1);
+      expect(playback.position, Duration.zero);
+      audio.positionEvents.add(const Duration(seconds: 1));
+      await playback.previous();
+      expect(playback.currentIndex, 0);
+      expect(playback.position, Duration.zero);
+      expect(resolutions.where((id) => id == 'a'), hasLength(1));
+      expect(audio.loadCount, 1);
+      expect(audio.stopCount, 1);
+      expect(audio.entries.first.httpHeaders['User-Agent'], 'audio-a');
+    },
+  );
+  test(
+    'Tapping the current track restarts it without rebuilding the player',
+    () async {
+      await playback.playTrack(0);
+      await drain();
+      audio.positionEvents.add(const Duration(seconds: 10));
+      await playback.playTrack(0);
+      expect(playback.position, Duration.zero);
+      expect(audio.loadCount, 1);
+      expect(resolutions.where((id) => id == 'a'), hasLength(1));
+    },
+  );
+  test('Expired queued URLs are refreshed instead of reused', () async {
+    await playback.playTrack(0);
+    await drain();
+    now = now.add(const Duration(minutes: 5));
+    await playback.playTrack(1);
+    await drain();
+    expect(audio.loadCount, 2);
+    expect(resolutions.where((id) => id == 'b'), hasLength(2));
+    expect(playback.currentIndex, 1);
+  });
+  test('A failed queue seek refreshes the selected URL once', () async {
+    await playback.playTrack(0);
+    await drain();
+    audio.onSeek = (_) => throw StateError('Expired queued source');
+    await playback.playTrack(1);
+    await drain();
+    expect(resolutions.where((id) => id == 'b'), hasLength(2));
+    expect(audio.loadCount, 2);
+    expect(playback.error, isNull);
+    expect(playback.currentIndex, 1);
+  });
+  test(
+    'A reused source playback error refreshes once without an error loop',
+    () async {
+      await playback.playTrack(0);
+      await drain();
+      await playback.playTrack(1);
+      audio.errorEvents.add('Cached source rejected');
+      await drain();
+      expect(resolutions.where((id) => id == 'b'), hasLength(2));
+      expect(playback.error, isNull);
+      expect(playback.currentIndex, 1);
+      audio.errorEvents.add('Fresh source rejected');
+      await drain();
+      expect(resolutions.where((id) => id == 'b'), hasLength(2));
+      expect(playback.error, 'Fresh source rejected');
+    },
+  );
+  test('Loading a rejected cached URL retries with fresh media', () async {
+    await playback.playTrack(0);
+    await drain();
+    await playback.stop();
+    audio.onLoad = (_) {
+      if (audio.loadCount == 2) throw StateError('Cached source rejected');
+    };
+    await playback.playTrack(0);
+    await drain();
+    expect(audio.loadCount, 3);
+    expect(resolutions.where((id) => id == 'a'), hasLength(2));
+    expect(playback.error, isNull);
+    expect(audio.playing, isTrue);
   });
   test(
     'Automatic advance during append updates the current track and timing',

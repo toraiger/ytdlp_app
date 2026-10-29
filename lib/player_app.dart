@@ -733,7 +733,9 @@ class _MiniPlayer extends StatelessWidget {
                             const SizedBox(height: 3),
                             Text(
                               playback.isBusy
-                                  ? '再生 URL を取得中…'
+                                  ? playback.isResolvingUrl
+                                      ? '再生 URL を取得中…'
+                                      : 'メディアを読み込み中…'
                                   : track?.channel ?? 'あなたの Mix を待っています',
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
