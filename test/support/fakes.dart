@@ -49,12 +49,15 @@ http.Response jsonResponse(Object value, {int status = 200}) => http.Response(
   status,
   headers: {'content-type': 'application/json'},
 );
-ApiClient mockApi(FutureOr<http.Response> Function(http.Request) handler) =>
-    ApiClient(
-      serverUrl: 'https://api.example.test',
-      apiKey: 'test-key',
-      client: MockClient((request) async => handler(request)),
-    );
+ApiClient mockApi(
+  FutureOr<http.Response> Function(http.Request) handler, {
+  DateTime Function()? now,
+}) => ApiClient(
+  serverUrl: 'https://api.example.test',
+  apiKey: 'test-key',
+  client: MockClient((request) async => handler(request)),
+  now: now,
+);
 Future<void> drain() async {
   for (var i = 0; i < 12; i++) {
     await Future<void>.delayed(Duration.zero);
@@ -75,11 +78,14 @@ class FakeAudioEngine implements AudioEngine {
   final errorEvents = StreamController<String>.broadcast(sync: true);
   final entries = <QueueEntry>[];
   int loadCount = 0;
+  int stopCount = 0;
   Duration? lastSeek;
   bool playing = false;
   FutureOr<void> Function(QueueEntry entry)? onAppend;
   // 終了処理の遅延・失敗を再現し、API取得との並行性を検証するためのフック。
   FutureOr<void> Function()? onStop;
+  FutureOr<void> Function(QueueEntry entry)? onLoad;
+  FutureOr<void> Function(int? index)? onSeek;
   int? _index;
   Duration _position = Duration.zero;
   Duration? _duration;
@@ -105,6 +111,8 @@ class FakeAudioEngine implements AudioEngine {
       ..clear()
       ..add(entry);
     indexEvents.add(0);
+    final callback = onLoad;
+    if (callback != null) await callback(entry);
     durationEvents.add(const Duration(seconds: 120));
     stateEvents.add(const AudioStatus(false, AudioPhase.ready));
   }
@@ -132,6 +140,7 @@ class FakeAudioEngine implements AudioEngine {
   Future<void> stop() async {
     final callback = onStop;
     if (callback != null) await callback();
+    stopCount++;
     entries.clear();
     playing = false;
     _index = null;
@@ -142,8 +151,15 @@ class FakeAudioEngine implements AudioEngine {
 
   @override
   Future<void> seek(Duration position, {int? index}) async {
+    final callback = onSeek;
+    if (callback != null) await callback(index);
     lastSeek = position;
-    if (index != null) indexEvents.add(index);
+    if (index != null) {
+      _position = position;
+      _duration = entries[index].track.duration;
+      indexEvents.add(index);
+      durationEvents.add(_duration);
+    }
     positionEvents.add(position);
   }
 

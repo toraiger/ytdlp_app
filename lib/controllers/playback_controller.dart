@@ -12,24 +12,12 @@ import 'mix_controller.dart';
 typedef VideoEngineFactory =
     VideoEngine Function(Uri uri, Map<String, String> httpHeaders);
 
-// 先頭1曲のURLだけを保持する。Futureも共有し、取得中のタップで二重送信しない。
-class _PreparedStream {
-  /// 対象IDを保存する。responseと期限は準備処理が設定し、ネイティブ再生は行わない。
-  _PreparedStream(this.videoId);
-
-  final String videoId;
-  late final Future<StreamResponse?> response;
-  DateTime? validUntil;
-}
-
 class PlaybackController extends ChangeNotifier {
   PlaybackController({
     required this.mix,
     required AudioEngine audio,
     VideoEngineFactory? videoFactory,
-    DateTime Function()? now,
   }) : _audio = audio,
-       _now = now ?? DateTime.now,
        _videoFactory = videoFactory ?? NativeVideoEngine.new {
     _mixRevision = mix.revision;
     _subscriptions.addAll([
@@ -37,10 +25,7 @@ class PlaybackController extends ChangeNotifier {
       _audio.positions.listen((_) => _syncAudioProgress()),
       _audio.durations.listen((_) => _syncAudioProgress()),
       _audio.indexes.listen((_) => _syncAudioProgress()),
-      _audio.errors.listen((value) {
-        error = value;
-        _notify();
-      }),
+      _audio.errors.listen(_onAudioError),
     ]);
     mix.addListener(_onMixChanged);
   }
@@ -48,18 +33,16 @@ class PlaybackController extends ChangeNotifier {
   final MixController mix;
   final AudioEngine _audio;
   final VideoEngineFactory _videoFactory;
-  // 時計を差し替え可能にし、期限切れを実時間の待機なしで検証する。
-  final DateTime Function() _now;
   final List<StreamSubscription<dynamic>> _subscriptions = [];
   final List<QueueEntry> _queue = [];
   Future<void> _audioTail = Future.value();
   // _videoをnullにした後も解放が続くため、次の選択もその完了を共有して待つ。
   Future<void> _videoTail = Future.value();
-  _PreparedStream? _preparedStream;
   late int _mixRevision;
   Stopwatch? _startupProgress;
   VideoEngine? _video;
   int _generation = 0;
+  int _selection = 0;
   int? _fillingGeneration;
   int? _completedGeneration;
   int? _attemptedExtendLength;
@@ -67,6 +50,14 @@ class PlaybackController extends ChangeNotifier {
   int _nextCandidate = 0;
   bool _disposed = false;
   bool _videoForeground = true;
+  Future<bool>? _firstPreparation;
+  int? _firstPreparationGeneration;
+  String? _preparedSession;
+  ApiClient? _preparedApi;
+  bool _firstMediaLoading = false;
+  bool _canRefreshCurrent = false;
+  bool _playbackFailed = false;
+  String? _pendingAudioError;
 
   PlaybackMode mode = PlaybackMode.audio;
   MixTrack? currentTrack;
@@ -74,6 +65,7 @@ class PlaybackController extends ChangeNotifier {
   bool isDirect = false;
   bool isPlaying = false;
   bool isBusy = false;
+  bool isResolvingUrl = false;
   Duration position = Duration.zero;
   Duration duration = Duration.zero;
   String? error;
@@ -99,94 +91,60 @@ class PlaybackController extends ChangeNotifier {
     if (mode == value) return;
     await stop();
     mode = value;
+    if (mode == PlaybackMode.audio) _onMixChanged();
     _notify();
   }
 
-  /// 現在のMixの先頭曲URLを非同期に準備する。入力・戻り値なし、再生は開始しない。
+  /// 音声は先頭曲を読み込み、動画はURLだけ準備する。再生は開始しない。
   void prepareFirstTrack() {
     if (_disposed || mix.isLoading || mix.items.isEmpty) return;
-    final prepared = _PreparedStream(mix.items.first.videoId);
-    _preparedStream = prepared;
-    prepared.response = _prepareStream(prepared, mix.api);
-  }
-
-  /// APIから音声・動画URLを取得し期限を設定する。準備失敗は通知せずnullを返す。
-  Future<StreamResponse?> _prepareStream(
-    _PreparedStream prepared,
-    ApiClient api,
-  ) async {
-    try {
-      final response = await api.resolveStream(prepared.videoId);
-      prepared.validUntil = _preparationDeadline(response);
-      return response;
-    } catch (_) {
-      // 古い準備の失敗が、新しいMixの準備を消さないよう同一性を確認する。
-      if (identical(_preparedStream, prepared)) _preparedStream = null;
-      return null;
+    if (mode == PlaybackMode.audio) {
+      _onMixChanged();
+    } else {
+      unawaited(
+        mix.api
+            .resolveStream(mix.items.first.videoId, mode: mode)
+            .then((_) {}, onError: (Object _) {}),
+      );
     }
-  }
-
-  /// 取得完了から60秒、かつ音声・動画URLの明示期限の30秒前までの早い方を返す。
-  DateTime _preparationDeadline(StreamResponse response) {
-    final now = _now();
-    var deadline = now.add(const Duration(seconds: 60));
-    final epochSeconds = now.millisecondsSinceEpoch ~/ 1000;
-    for (final media in [response.audio, response.videoAudio]) {
-      final uri = media?.url;
-      if (uri == null) continue;
-      // Google Videoのquery形式とHLSの /expire/秒数/ 形式の両方を読む。
-      final values = [
-        ...?uri.queryParametersAll['expire'],
-        ...?uri.queryParametersAll['expires'],
-      ];
-      final segments = uri.pathSegments;
-      for (var i = 0; i + 1 < segments.length; i++) {
-        if (segments[i] == 'expire') values.add(segments[i + 1]);
-      }
-      for (final value in values) {
-        final expires = int.tryParse(value);
-        if (expires == null || expires > epochSeconds + 90) continue;
-        if (expires <= epochSeconds + 30) return now;
-        final safeDeadline = DateTime.fromMillisecondsSinceEpoch(
-          (expires - 30) * 1000,
-          isUtc: true,
-        );
-        if (safeDeadline.isBefore(deadline)) deadline = safeDeadline;
-      }
-    }
-    return deadline;
-  }
-
-  /// 同じ曲の準備結果または実行中の要求を使い、失効・失敗時だけ通常取得する。
-  Future<StreamResponse?> _resolveTrack(String videoId) async {
-    final generation = _generation;
-    final api = mix.api;
-    final prepared = _preparedStream;
-    if (prepared != null && prepared.videoId == videoId) {
-      final response = await prepared.response;
-      if (!_isCurrent(generation)) return null;
-      final deadline = prepared.validUntil;
-      if (response != null && deadline != null && _now().isBefore(deadline)) {
-        return response;
-      }
-      if (identical(_preparedStream, prepared)) _preparedStream = null;
-    }
-    return api.resolveStream(videoId);
   }
 
   Future<void> playTrack(int index) async {
     if (index < 0 || index >= mix.items.length) return;
     final track = mix.items[index];
-    // await中のモード変更で、別の形式を選ばないよう要求時のモードを保持する。
+    if (mode == PlaybackMode.audio && !isDirect && !_playbackFailed) {
+      final preparation =
+          index == 0 && _firstPreparationGeneration == _generation
+              ? _firstPreparation
+              : null;
+      if (preparation != null || (!isBusy && _reusableQueueIndex(index) >= 0)) {
+        await _activateQueuedTrack(track, index, preparation);
+        return;
+      }
+    }
+    await _startTrack(track, index, refresh: _playbackFailed);
+  }
+
+  Future<void> _startTrack(
+    MixTrack track,
+    int index, {
+    bool refresh = false,
+  }) async {
     final requestedMode = mode;
     await _start(
       track,
       mixIndex: index,
-      resolve: () async {
-        final response = await _resolveTrack(track.videoId);
+      refresh: refresh,
+      cached: mix.api.cachedMedia(track.videoId, requestedMode) != null,
+      resolve: (refresh) async {
+        final response = await mix.api.resolveStream(
+          track.videoId,
+          mode: requestedMode,
+          refresh: refresh,
+        );
         return requestedMode == PlaybackMode.audio
-            ? response?.audio
-            : response?.videoAudio;
+            ? response.audio
+            : response.videoAudio;
       },
     );
   }
@@ -204,18 +162,25 @@ class PlaybackController extends ChangeNotifier {
         title: '直接 URL テスト',
         channel: 'HTTPS stream',
       ),
-      resolve: () async => StreamFormat(url: uri),
+      resolve: (_) async => StreamFormat(url: uri),
     );
   }
 
   Future<void> _start(
     MixTrack track, {
     int? mixIndex,
-    required Future<StreamFormat?> Function() resolve,
+    required Future<StreamFormat?> Function(bool refresh) resolve,
+    bool refresh = false,
+    bool cached = false,
   }) async {
     final generation = ++_generation;
+    final selection = ++_selection;
     final requestedMode = mode;
     _startupProgress = Stopwatch()..start();
+    _firstPreparation = null;
+    _canRefreshCurrent = !refresh && cached;
+    _playbackFailed = false;
+    _pendingAudioError = null;
     _queue.clear();
     _queueIndex = 0;
     _nextCandidate = (mixIndex ?? 0) + 1;
@@ -224,16 +189,18 @@ class PlaybackController extends ChangeNotifier {
     currentIndex = mixIndex;
     isDirect = mixIndex == null;
     isBusy = true;
+    isResolvingUrl = mixIndex != null && (refresh || !cached);
     isPlaying = false;
     position = Duration.zero;
     duration = Duration.zero;
     error = null;
     _notify();
+    var resolvedMedia = false;
     try {
       // 両方のFutureに直ちにエラーハンドラーを付ける。終了処理中のAPI失敗も
       // 未処理例外にせず、新プレーヤーは終了処理とURL取得の両方を待って作る。
       final results = await Future.wait<StreamFormat?>([
-        Future.sync(resolve),
+        Future.sync(() => resolve(refresh)),
         (() async {
           await _releaseVideo();
           await _mutateAudio(generation, _audio.stop);
@@ -246,6 +213,10 @@ class PlaybackController extends ChangeNotifier {
       if (media == null || uri == null) {
         throw const ApiFailure('この曲に再生可能な HTTPS URL がありません。別の曲をお試しください。');
       }
+      resolvedMedia = true;
+      isResolvingUrl = false;
+      _pendingAudioError = null;
+      _notify();
       if (requestedMode == PlaybackMode.audio) {
         final entry = QueueEntry(
           track: track,
@@ -272,30 +243,125 @@ class PlaybackController extends ChangeNotifier {
       }
     } catch (e) {
       if (_isCurrent(generation)) {
+        if (cached && !refresh && resolvedMedia) {
+          await _start(
+            track,
+            mixIndex: mixIndex,
+            resolve: resolve,
+            refresh: true,
+          );
+          return;
+        }
         _startupProgress = null;
         error =
             e is ApiFailure ? e.message : 'メディアを再生できません。曲を選び直すか、接続状態を確認してください。';
+        _playbackFailed = true;
         isPlaying = false;
       }
     } finally {
-      if (_isCurrent(generation)) {
-        isBusy = false;
-        if (requestedMode == PlaybackMode.audio && error == null) {
-          _syncAudioProgress();
-        }
-        _notify();
-      }
+      _finishPreparation(generation, selection);
     }
+  }
+
+  bool _isSelectionCurrent(int generation, int selection) =>
+      _isCurrent(generation) && _selection == selection;
+
+  int _reusableQueueIndex(int mixIndex) {
+    if (mixIndex < 0 || mixIndex >= mix.items.length) return -1;
+    final track = mix.items[mixIndex];
+    final media = mix.api.cachedMedia(track.videoId, PlaybackMode.audio);
+    return _queue.indexWhere(
+      (entry) =>
+          entry.mixIndex == mixIndex &&
+          entry.track.videoId == track.videoId &&
+          media?.url == entry.uri &&
+          mapEquals(media?.httpHeaders, entry.httpHeaders),
+    );
+  }
+
+  Future<void> _activateQueuedTrack(
+    MixTrack track,
+    int mixIndex,
+    Future<bool>? preparation,
+  ) async {
+    final generation = _generation;
+    final selection = ++_selection;
+    _startupProgress = Stopwatch()..start();
+    currentTrack = track;
+    currentIndex = mixIndex;
+    isBusy = true;
+    isResolvingUrl = preparation != null && !_firstMediaLoading;
+    isPlaying = false;
+    position = Duration.zero;
+    duration = track.duration ?? Duration.zero;
+    _completedGeneration = null;
+    _canRefreshCurrent = true;
+    _playbackFailed = false;
+    _pendingAudioError = null;
+    error = null;
+    _notify();
+    try {
+      final prepared = preparation == null || await preparation;
+      if (!_isSelectionCurrent(generation, selection)) return;
+      final queueIndex = prepared ? _reusableQueueIndex(mixIndex) : -1;
+      if (queueIndex < 0) {
+        await _startTrack(track, mixIndex, refresh: !prepared);
+        return;
+      }
+      isResolvingUrl = false;
+      await _mutateAudio(generation, () async {
+        if (_isSelectionCurrent(generation, selection)) {
+          await _audio.seek(Duration.zero, index: queueIndex);
+        }
+      });
+      if (_isSelectionCurrent(generation, selection)) _playAudio(generation);
+    } catch (_) {
+      if (_isSelectionCurrent(generation, selection)) {
+        await _startTrack(track, mixIndex, refresh: true);
+      }
+    } finally {
+      _finishPreparation(generation, selection);
+    }
+  }
+
+  void _finishPreparation(int generation, int selection) {
+    if (!_isSelectionCurrent(generation, selection)) return;
+    isBusy = false;
+    isResolvingUrl = false;
+    if (mode == PlaybackMode.audio && !_playbackFailed) {
+      _syncAudioProgress();
+      if (!isDirect) unawaited(_fillQueue(generation));
+    }
+    final pendingError = _pendingAudioError;
+    _pendingAudioError = null;
+    _notify();
+    if (pendingError != null && !_playbackFailed) _onAudioError(pendingError);
+  }
+
+  void _onAudioError(String value) {
+    if (mode != PlaybackMode.audio || currentTrack == null) return;
+    if (isBusy) {
+      _pendingAudioError = value;
+      return;
+    }
+    if (_canRefreshCurrent && !isDirect && currentIndex != null) {
+      _canRefreshCurrent = false;
+      unawaited(_startTrack(currentTrack!, currentIndex!, refresh: true));
+      return;
+    }
+    error = value;
+    _playbackFailed = true;
+    isPlaying = false;
+    _notify();
   }
 
   void _playAudio(int generation) {
     if (!_isCurrent(generation)) return;
+    final selection = _selection;
     unawaited(
       _audio.play().catchError((Object _) {
-        if (_isCurrent(generation)) {
-          error = '音声を再生できません。曲を選び直して再度お試しください。';
-          isPlaying = false;
-          _notify();
+        if (_isSelectionCurrent(generation, selection)) {
+          _onAudioError('音声を再生できません。曲を選び直して再度お試しください。');
         }
       }),
     );
@@ -368,12 +434,93 @@ class PlaybackController extends ChangeNotifier {
   void _onMixChanged() {
     if (_mixRevision != mix.revision) {
       _mixRevision = mix.revision;
-      _preparedStream = null;
-      // UI以外からのMix再取得・設定変更でも、旧応答からの再生開始を防ぐ。
-      if (currentTrack != null && !isDirect) unawaited(stop());
+      _preparedSession = null;
+      _preparedApi = null;
+      if (!isDirect &&
+          (currentTrack != null ||
+              _firstPreparation != null ||
+              _queue.isNotEmpty)) {
+        unawaited(stop());
+      }
     }
-    if (!mix.isLoading && currentTrack != null && !isDirect && !isBusy) {
+    if (mix.isLoading || mix.items.isEmpty) {
+      _preparedSession = null;
+      _preparedApi = null;
+      return;
+    }
+    if (mode == PlaybackMode.audio &&
+        currentTrack == null &&
+        !isBusy &&
+        (_preparedSession != mix.sessionId || _preparedApi != mix.api)) {
+      _preparedSession = mix.sessionId;
+      _preparedApi = mix.api;
+      final generation = _generation;
+      _firstPreparationGeneration = generation;
+      _firstMediaLoading = false;
+      final preparation = _prepareFirstTrack(generation, mix.api);
+      _firstPreparation = preparation;
+      unawaited(
+        preparation.then((_) {
+          if (identical(_firstPreparation, preparation)) {
+            _firstPreparation = null;
+          }
+        }),
+      );
+    }
+    if (currentTrack != null && !isDirect && !isBusy) {
       unawaited(_fillQueue(_generation));
+    }
+  }
+
+  Future<bool> _prepareFirstTrack(int generation, ApiClient api) async {
+    final track = mix.items.first;
+    try {
+      final response = await api.resolveStream(track.videoId);
+      if (!_isCurrent(generation)) return false;
+      final media = response.audio;
+      final uri = media?.url;
+      if (media == null || uri == null) return false;
+      _firstMediaLoading = true;
+      if (isBusy && currentIndex == 0) {
+        isResolvingUrl = false;
+        _notify();
+      }
+      await _mutateAudio(generation, () async {
+        _queue
+          ..clear()
+          ..add(
+            QueueEntry(
+              track: track,
+              uri: uri,
+              mixIndex: 0,
+              httpHeaders: media.httpHeaders,
+            ),
+          );
+        _queueIndex = 0;
+        _nextCandidate = 1;
+        await measureStartup('player_load', () => _audio.load(_queue.single));
+      });
+      if (!_isCurrent(generation)) return false;
+      unawaited(_prepareUpcomingUrls(generation, api));
+      return true;
+    } catch (_) {
+      if (_isCurrent(generation)) {
+        _queue.clear();
+        api.invalidateStream(track.videoId);
+      }
+      return false;
+    }
+  }
+
+  Future<void> _prepareUpcomingUrls(int generation, ApiClient api) async {
+    final tracks = mix.items.skip(1).take(2);
+    for (final track in tracks) {
+      if (!_isCurrent(generation)) return;
+      try {
+        await api.resolveStream(track.videoId);
+      } catch (_) {
+        return;
+      }
     }
   }
 
@@ -392,7 +539,10 @@ class PlaybackController extends ChangeNotifier {
     position = snapshot.position;
     duration = snapshot.duration ?? Duration.zero;
     _recordFirstProgress();
-    if (changed) _completedGeneration = null;
+    if (changed) {
+      _completedGeneration = null;
+      _canRefreshCurrent = true;
+    }
     _notify();
     if (changed && !isDirect) unawaited(_fillQueue(_generation));
   }
@@ -419,6 +569,7 @@ class PlaybackController extends ChangeNotifier {
     isPlaying = value.playing;
     _recordFirstProgress();
     if (value.hasError) {
+      _playbackFailed = true;
       error = '動画を再生できません。曲を選び直して再度お試しください。';
     }
     _notify();
@@ -468,20 +619,11 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> next() async {
     if (currentIndex == null || isDirect || isBusy) return;
-    final generation = _generation;
     if (mode == PlaybackMode.audio && _queueIndex + 1 < _queue.length) {
-      try {
-        await _mutateAudio(
-          generation,
-          () => _audio.seek(Duration.zero, index: _queueIndex + 1),
-        );
-        _playAudio(generation);
-      } catch (_) {
-        error = '次の曲へ移動できません。曲一覧から選び直してください。';
-        _notify();
-      }
+      await playTrack(_queue[_queueIndex + 1].mixIndex!);
       return;
     }
+    final generation = _generation;
     final index = currentIndex! + 1;
     if (index >= mix.items.length) await _extendOnce(generation);
     if (!_isCurrent(generation)) return;
@@ -555,15 +697,19 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> stop() async {
     final generation = ++_generation;
-    // stop後に同じ曲を選んでも、停止前の期限付きURLや待ち時間を引き継がない。
-    _preparedStream = null;
     _startupProgress = null;
+    _selection++;
+    _firstPreparation = null;
+    _pendingAudioError = null;
+    _canRefreshCurrent = false;
+    _playbackFailed = false;
     _queue.clear();
     currentTrack = null;
     currentIndex = null;
     isDirect = false;
     isPlaying = false;
     isBusy = false;
+    isResolvingUrl = false;
     position = Duration.zero;
     duration = Duration.zero;
     error = null;
@@ -583,7 +729,6 @@ class PlaybackController extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _generation++;
-    _preparedStream = null;
     _startupProgress = null;
     mix.removeListener(_onMixChanged);
     for (final subscription in _subscriptions) {

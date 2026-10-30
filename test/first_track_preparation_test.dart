@@ -37,14 +37,13 @@ void main() {
               return resolveOverride?.call(id) ?? jsonResponse(streamJson(id));
             }
             return jsonResponse(mixJson(['a', 'b', 'c']));
-          }),
+          }, now: () => now),
         );
     await mix.load(defaultMixUrl);
     audio = FakeAudioEngine();
     playback = PlaybackController(
       mix: mix,
       audio: audio,
-      now: () => now,
       videoFactory: (_, headers) {
         videoHeaders.add(headers);
         final video = FakeVideoEngine();
@@ -60,12 +59,12 @@ void main() {
   });
 
   test(
-    'Preparation resolves only first URL without loading or playing media',
+    'Preparation loads first audio and resolves upcoming URLs without autoplay',
     () async {
       playback.prepareFirstTrack();
       await drain();
-      expect(resolutions, ['a']);
-      expect(audio.loadCount, 0);
+      expect(resolutions, ['a', 'b', 'c']);
+      expect(audio.loadCount, 1);
       expect(audio.playing, isFalse);
       expect(videos, isEmpty);
       expect(playback.currentTrack, isNull);
@@ -75,6 +74,7 @@ void main() {
       await drain();
       expect(resolutions, ['a', 'b', 'c']);
       expect(audio.entries.first.httpHeaders['User-Agent'], 'audio-a');
+      expect(audio.loadCount, 1);
       expect(audio.playing, isTrue);
     },
   );
@@ -137,22 +137,30 @@ void main() {
     },
   );
 
-  // 期限は取得開始ではなく取得完了から数える。境界の60秒では再利用しない。
-  test('Cache lasts at most sixty seconds from response completion', () async {
+  // 期限は取得開始ではなく取得完了から数える。境界の5分では再利用しない。
+  test('Cache lasts at most five minutes from response completion', () async {
     final response = Completer<http.Response>();
-    resolveOverride = (_) => response.future;
+    resolveOverride =
+        (id) => id == 'a' ? response.future : jsonResponse(streamJson(id));
     playback.prepareFirstTrack();
     now = now.add(const Duration(seconds: 20));
     response.complete(jsonResponse(streamJson('a')));
     await drain();
-    now = now.add(const Duration(seconds: 60));
+    now = now.add(const Duration(minutes: 5));
     resolveOverride = null;
     await playback.playTrack(0);
     await drain();
     expect(resolutions.where((id) => id == 'a'), hasLength(2));
   });
 
-  for (final location in ['audio-query', 'video-query', 'video-path']) {
+  for (final location in [
+    'audio-query',
+    'audio-expires',
+    'audio-path',
+    'video-query',
+    'video-expires',
+    'video-path',
+  ]) {
     test(
       '$location expiry limits preparation to thirty seconds before expiry',
       () async {
@@ -160,12 +168,15 @@ void main() {
             now.add(const Duration(seconds: 45)).millisecondsSinceEpoch ~/ 1000;
         final json = streamJson('a');
         final key = location.startsWith('audio') ? 'audio' : 'video_audio';
+        if (key == 'video_audio') await playback.setMode(PlaybackMode.video);
         final format = json[key] as Map<String, dynamic>;
+        final parameter = location.endsWith('expires') ? 'expires' : 'expire';
         format['url'] =
             location.endsWith('path')
                 ? 'https://media.example.test/expire/$expires/file.m3u8'
-                : 'https://media.example.test/file?expire=$expires';
-        resolveOverride = (_) => jsonResponse(json);
+                : 'https://media.example.test/file?$parameter=$expires';
+        resolveOverride =
+            (id) => jsonResponse(id == 'a' ? json : streamJson(id));
         playback.prepareFirstTrack();
         await drain();
         now = now.add(const Duration(seconds: 15));
@@ -213,14 +224,20 @@ void main() {
     },
   );
 
-  test('Reloading even the same Mix session discards preparation', () async {
-    playback.prepareFirstTrack();
-    await drain();
-    await mix.load(defaultMixUrl);
-    await playback.playTrack(0);
-    await drain();
-    expect(resolutions.where((id) => id == 'a'), hasLength(2));
-  });
+  test(
+    'Reloading the same Mix session reloads audio using valid cached URLs',
+    () async {
+      playback.prepareFirstTrack();
+      await drain();
+      expect(audio.loadCount, 1);
+      await mix.load(defaultMixUrl);
+      await playback.playTrack(0);
+      await drain();
+      expect(resolutions.where((id) => id == 'a'), hasLength(1));
+      expect(audio.loadCount, 2);
+      expect(audio.playing, isTrue);
+    },
+  );
 
   test(
     'New API configuration prevents old pending response from starting',

@@ -5,6 +5,7 @@ import 'package:video_player/video_player.dart';
 import 'controllers/mix_controller.dart';
 import 'controllers/playback_controller.dart';
 import 'models/api_models.dart';
+import 'models/api_timing.dart';
 import 'services/api_client.dart';
 import 'services/app_settings.dart';
 import 'services/playback_engines.dart';
@@ -136,6 +137,7 @@ class _PlayerScreenState extends State<_PlayerScreen>
       builder:
           (_) => _ConnectionDialog(
             initial: _settings,
+            api: _mix.isConfigured ? _mix.api : null,
             onSave: (url, key) async {
               ApiClient.validateServerUrl(url);
               await widget.settings.saveConnection(serverUrl: url, apiKey: key);
@@ -160,7 +162,7 @@ class _PlayerScreenState extends State<_PlayerScreen>
     await _playback.stop();
     final loaded = await _mix.load(_url.text);
     if (loaded && mounted) {
-      // 一覧の表示や設定保存を待たせずURLだけ準備する。音は曲タップまで出さない。
+      // 音声の自動準備と共有し、動画モードではURLだけ準備する。
       _playback.prepareFirstTrack();
       try {
         await widget.settings.saveLastMix(_url.text.trim());
@@ -735,7 +737,9 @@ class _MiniPlayer extends StatelessWidget {
                             const SizedBox(height: 3),
                             Text(
                               playback.isBusy
-                                  ? '再生 URL を取得中…'
+                                  ? playback.isResolvingUrl
+                                      ? '再生 URL を取得中…'
+                                      : 'メディアを読み込み中…'
                                   : track?.channel ?? 'あなたの Mix を待っています',
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
@@ -849,8 +853,13 @@ class _MiniPlayer extends StatelessWidget {
 }
 
 class _ConnectionDialog extends StatefulWidget {
-  const _ConnectionDialog({required this.initial, required this.onSave});
+  const _ConnectionDialog({
+    required this.initial,
+    required this.onSave,
+    this.api,
+  });
   final SettingsSnapshot initial;
+  final ApiClient? api;
   final Future<void> Function(String url, String key) onSave;
   @override
   State<_ConnectionDialog> createState() => _ConnectionDialogState();
@@ -935,6 +944,32 @@ class _ConnectionDialogState extends State<_ConnectionDialog> {
                   enableSuggestions: false,
                   decoration: const InputDecoration(labelText: 'X-API-Key'),
                 ),
+                if (widget.api != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 16),
+                    child: ValueListenableBuilder<ApiTiming?>(
+                      valueListenable: widget.api!.lastTiming,
+                      builder:
+                          (_, timing, __) => Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              const Text('直近の API 通信時間'),
+                              Text(
+                                timing == null
+                                    ? 'まだ計測していません。'
+                                    : '${timing.operation.label}: '
+                                        '${(timing.total.inMicroseconds / 1000000).toStringAsFixed(3)}秒'
+                                        '（${timing.statusLabel}）',
+                                style: const TextStyle(fontSize: 12),
+                              ),
+                              const Text(
+                                'サーバーの処理時間を含みます。',
+                                style: TextStyle(fontSize: 11, color: _muted),
+                              ),
+                            ],
+                          ),
+                    ),
+                  ),
                 if (_error != null)
                   Padding(
                     padding: const EdgeInsets.only(top: 14),

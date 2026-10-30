@@ -11,6 +11,7 @@ dependencies:
   flutter:
     sdk: flutter
   http: 1.6.0
+  cupertino_http: 2.4.0
   just_audio: 0.10.6
   just_audio_background: 0.0.1-beta.17
   audio_session: 0.2.4

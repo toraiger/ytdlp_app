@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 from playwright.sync_api import sync_playwright, expect
 
@@ -55,11 +56,21 @@ with sync_playwright() as p:
         page.locator("flt-semantics-placeholder").evaluate("(element)=>element.click()")
         page.get_by_role("button",name="API サーバー設定",exact=True).click()
         expect(page.get_by_role("textbox")).to_have_count(2)
-        page.get_by_role("textbox").nth(0).fill("https://mix-api.example.test")
+        page.get_by_role("textbox").nth(0).click()
         page.wait_for_timeout(200)
-        page.get_by_role("textbox").nth(1).fill("browser-test-key")
+        page.get_by_role("textbox").nth(0).fill("https://mix-api.example.test")
+        page.get_by_role("textbox").nth(1).click()
+        page.wait_for_timeout(200)
+        page.get_by_role("textbox").nth(1).press_sequentially("browser-test-key",delay=25)
+        expect(page.get_by_role("textbox").nth(1)).to_have_value("browser-test-key")
         page.wait_for_timeout(200)
         page.get_by_role("button",name="保存",exact=True).click()
+        page.get_by_role("button",name="保存",exact=True).wait_for(state="hidden")
+        page.get_by_role("button",name="API サーバー設定",exact=True).click()
+        page.get_by_role("textbox").nth(1).click()
+        expect(page.get_by_role("textbox").nth(1)).to_have_value("browser-test-key")
+        page.get_by_role("button",name="キャンセル",exact=True).click()
+        expect(page.get_by_role("button",name="Mix を20曲取得",exact=True)).to_be_enabled()
         page.get_by_role("button",name="Mix を20曲取得",exact=True).click()
         expect(page.get_by_text("Evening Mix · テスト",exact=False)).to_be_visible()
         print("Mix fetched and settings saved.")
@@ -78,6 +89,12 @@ with sync_playwright() as p:
         page.get_by_role("button",name="停止",exact=True).click()
         expect(page.get_by_text("再生する曲を選択",exact=False)).to_be_visible()
         print("Audio transport verified.")
+        page.get_by_role("button",name="API サーバー設定",exact=True).click()
+        expect(page.get_by_text("直近の API 通信時間",exact=False)).to_be_visible()
+        expect(page.get_by_text(re.compile(r"(Mix取得|再生URL取得|曲の追加取得): [0-9]+\.[0-9]{3}秒"))).to_be_visible()
+        expect(page.get_by_text("サーバーの処理時間を含みます。",exact=False)).to_be_visible()
+        page.get_by_role("button",name="キャンセル",exact=True).click()
+        print("Measured API request time is visible in settings.")
         page.get_by_role("radio",name="動画＋音声",exact=True).click()
         page.get_by_role("button",name="1 夜の余白 Mix Player テスト音源 00:12",exact=True).click()
         expect(page.locator("video")).to_have_count(1,timeout=15000)

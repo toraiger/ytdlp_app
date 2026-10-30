@@ -36,7 +36,8 @@ Flutter内では`MixController`がセッションと楽曲一覧を管理し、`
 | UI | lib/player_app.dart | URL input, track list, dialogs, seek, controls, video panel |
 | Mix state | lib/controllers/mix_controller.dart | Load, deduplicate, extend session |
 | Playback state | lib/controllers/playback_controller.dart | Audio playlist, video playback, direct URL |
-| API | lib/services/api_client.dart | HTTPS POST, X-API-Key, 90-second timeout |
+| API | lib/services/api_client.dart | HTTPS POST, X-API-Key, 90-second timeout, request timing |
+| API transport | lib/services/api_http_client.dart | URLSession on iPhone; conditional imports for other platforms |
 | Models | lib/models/api_models.dart | Decode playlist and stream JSON |
 | Persistence | lib/services/app_settings.dart | Keychain / SharedPreferencesAsync |
 
@@ -149,10 +150,17 @@ X-API-Key: <key>
 
 ## 8. 連続再生・キュー制御
 
-<!-- URL準備と再生を分離し、Mix表示をURL取得やメディア読み込みで待たせない。 -->
-Mix取得成功後は先頭1曲の `/stream` を非同期に開始します。タップ時に同じ実行中要求または有効な結果を使い、準備だけではネイティブプレーヤーを読み込んだり再生したりしません。保持期限は取得完了から60秒と明示URL期限の30秒前の早い方です。停止・Mix再取得・API設定変更で破棄し、失敗・失効時はタップ時に通常取得します。
+音声の場合、一覧の取得後に先頭曲のURL取得とプレーヤーへの読み込みを先に行います。音声はタップされるまで再生しません。準備中に先頭曲をタップした場合は同じ処理の完了を待ち、URL取得や読み込みを重複させません。別の曲を選択した場合や停止した場合は、古い準備から再生を開始しません。
 
-音声の場合、開始曲のURLを取得した後、**次の2曲分**を `/stream` から順に取得してキューに追加します。再生曲が切り替わるとさらに補充を試みます。Mixの末尾へ到達すると `/extend` を一度試行します。
+先頭曲の準備ができたら次の2曲分のURLを取得し、再生開始後にキューへ追加します。音声は現在の曲から**次の2曲分**までを補充し、一覧からの選択と前後移動でも、有効なURL・ヘッダーを持つキューを再利用します。Mixの末尾へ到達すると `/extend` を一度試行します。
+
+`/stream` の結果はAPIクライアントごとに最大16曲・5分だけメモリに保持し、同じ曲の処理中のリクエストは共有します。URLに `expire` / `expires` クエリまたは `/expire/秒数/` がある場合は、選択した形式の期限の30秒前から再利用しません。再利用した音声の失敗時は1回だけURLを再取得し、新しく取得したURLでも失敗した場合はエラーを表示します。`include_formats=false` による全形式一覧の省略を維持します。
+
+意図的な待ち時間を設けず、iPhoneのAPI通信にURLSessionを使います。同じAPIクライアントのセッションを使い回し、対応サーバーではHTTP/2を自動交渉します。ネイティブHTTPキャッシュを使わず、APIレスポンスとCookieをディスクに保存しません。HTTPリダイレクト禁止とHTTPSの検証を維持します。
+
+Mixの再取得・API設定変更では古い準備と選択を無効にし、新しいMixへ古い応答を反映しません。有効なAPIキャッシュは同じ接続設定内で再利用します。未準備の曲ではURL取得と旧プレーヤーの終了処理を並行して進め、新しいプレーヤーの読み込みは両方の完了を待ちます。動画の解放処理は連続した曲選択でも共有して待機します。
+
+設定画面には直近に完了した実API通信の所要時間を表示します。計測はサーバー処理と応答受信を含み、メディア本体の読み込みは含みません。保持するのは処理種別・所要時間・HTTPステータス・成功可否で、APIキー・URL・動画ID・セッションID・本文は含めません。キャッシュ再利用では計測値を更新しません。
 
 - 再生URLには有効期限があります。先読み時点で有効でも再生時に失効する場合があります。
 - iOSがバックグラウンドでDart処理の実行を制限すると、API呼び出しやキュー補充が止まることがあります。
@@ -162,18 +170,19 @@ Mix取得成功後は先頭1曲の `/stream` を非同期に開始します。�
 - ユーザーがアプリを強制終了した後、OSの制限を超えて自動再生することはできません。
 
 ```text
-Mix loaded -> prepare first track URL (no autoplay)
-Select track -> reuse preparation or POST /stream; release old player in parallel
-Audio: start now -> resolve next 2 -> append -> refill on index change
-Video: resolve next at transition; wait for old controller disposal before initialization
+Mix loaded -> resolve first audio -> load without playing -> prepare next 2 URLs
+Select first track -> reuse preparation -> play -> append next 2
+Select queued track -> seek to queued source -> play
+Select uncached track -> POST /stream -> audio.url or video_audio.url
+Video: resolve next only at transition -> dispose old controller
 Queue tail: call /mix/{session_id}/extend (once per unchanged length)
 ```
 
 | Condition | Current behavior | Limitation |
 | --- | --- | --- |
-| Audio start | Resolve selected track; play; fill to 3 queued items | No bulk prefetch of entire Mix |
-| Audio next | SeekToNext when available, otherwise rebuild | Refresh not guaranteed |
-| Audio previous | At 3s or later restart same track; otherwise previous | At playlist head restart |
+| Audio start | Prepare first source after Mix load; reuse it when tapped | Immediate taps wait for remaining API/media preparation |
+| Audio next / list tap | Seek to a reusable queued source; otherwise resolve/load | Five-minute local retention and signed URL expiry apply |
+| Audio previous | At 3s or later restart same track; otherwise reuse previous if available | At playlist head restart |
 | Queue resolution error | Report error; skip the failed track | Retry is not implemented |
 | Video end | Trigger next() after completion | Background continuous video excluded |
 | Manual extend | Update controller track list; do not reset if growing | Server may return no new tracks |
@@ -203,7 +212,7 @@ Queue tail: call /mix/{session_id}/extend (once per unchanged length)
 | Invalid JSON | Report invalid JSON | Telemetry and redaction |
 | No tracks | Raise load failure | Offer fresh Mix request |
 | Audio URL missing | Fail start or skip prefetched track | Alternate format selection |
-| Media playback failure | Display player error | Re-resolve via /stream |
+| Media playback failure | Refresh reused audio once; surface errors from fresh sources | Real-device and network-change validation |
 | Extend failure | Save error and prevent loop at same size | Explicit retry UX |
 | Session expiry | No automatic recreation | Re-create playlist and reposition |
 | iOS background limit | Plugin + iOS audio mode configured | Long-duration device validation |
