@@ -58,12 +58,20 @@ Actions の **iOS unsigned IPA** を開き、Run workflow から対象のブラ�
 
 ~~~bash
 flutter pub get --enforce-lockfile
-flutter build ios --release --no-codesign --no-pub
+bash scripts/build_app.sh ios --release --no-codesign --no-pub
 ~~~
 
-成功した実行の Artifacts から **mix-player-ios-unsigned-ipa** をダウンロードし、ZIP 内の **MixPlayer-unsigned.ipa** を取り出してください。SHA-256 の確認用ファイルも含みます。Apple の証明書や署名用 Secrets は不要です。
+成功した実行の Artifacts から **mix-player-ios-unsigned-ipa** をダウンロードし、ZIP 内の **MixPlayer-バージョン-ビルド番号-コミット-unsigned.ipa** を取り出してください。SHA-256 の確認用ファイルと `BUILD-INFO.txt` も含みます。Apple の証明書や署名用 Secrets は不要です。
 
 この IPA は SideStore や Sideloadly で自分の Apple Account を使って再署名してインストールします。無料アカウントの署名期限は7日間で、継続利用には更新が必要です。署名なしの IPA を iPhone で開くだけではインストールできません。iOS の Bundle Identifier は jp.toraiger.mixPlayerApp です。実機でのインストールと音声再生は別途確認してください。
+
+### アプリを更新したか確認する
+
+新版を入れる際はZIPを展開し、SideStoreの My Apps →「＋」から新しい番号のIPAを選び、これまでと同じApple Accountで上書きインストールします。SideStoreの Refresh はインストール済みアプリの署名を更新する操作です。
+
+画面上部の Mix Player の下にバージョンとビルド番号を表示します。「API サーバー設定」にはコミット番号も表示するため、ZIP内の `BUILD-INFO.txt` と一致すればその版が起動しています。以前のIPAはすべて `0.1.0 (1)` でしたが、今後はGitHub Actionsの実行ごとにビルド番号が増えます。
+
+配布ビルドには `scripts/build_app.sh` を使用し、OSに登録するバージョンと画面表示へ同じ値を渡します。ローカルでは `pubspec.yaml` の番号を使い、`MIX_BUILD_NUMBER` で変更できます。通常の `flutter run` など、ビルド情報を渡さない起動では「開発ビルド」と表示します。
 
 ## Android にインストール
 
@@ -71,8 +79,8 @@ Android SDK とエミュレーター、または USB デバッグを有効にし
 
 ~~~bash
 flutter run -d <device-id>
-flutter build apk --debug --no-pub
-flutter build apk --release --no-pub
+bash scripts/build_app.sh apk --debug --no-pub
+bash scripts/build_app.sh apk --release --no-pub
 ~~~
 
 APK の生成先は build/app/outputs/flutter-apk/ 内の app-debug.apk と app-release.apk です。app-release.apk はリリースモードで最適化されますが、現時点ではテスト用の鍵で署名します。ストア配布用の独自署名鍵は未設定です。

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 
+import 'build_info.dart';
 import 'controllers/mix_controller.dart';
 import 'controllers/playback_controller.dart';
 import 'models/api_models.dart';
@@ -213,11 +214,26 @@ class _PlayerScreenState extends State<_PlayerScreen>
               ),
               const SizedBox(width: 12),
               const Flexible(
-                child: Text(
-                  'Mix Player',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 20, fontWeight: FontWeight.w700),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Mix Player',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                    Text(
+                      appVersionLabel,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 11, color: _muted),
+                    ),
+                  ],
                 ),
               ),
             ],
@@ -911,6 +927,16 @@ class _ConnectionDialogState extends State<_ConnectionDialog> {
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
+                const Text(
+                  'バージョン $appVersionLabel',
+                  style: TextStyle(color: _muted, fontSize: 12),
+                ),
+                if (appRevision.isNotEmpty)
+                  const Text(
+                    'コミット $appRevision',
+                    style: TextStyle(color: _muted, fontSize: 11),
+                  ),
+                const SizedBox(height: 12),
                 const Text(
                   'HTTPS の接続先と API キーを設定します。\nAPI キーは安全なストレージに保存されます。',
                   style: TextStyle(color: _muted, fontSize: 12, height: 1.6),

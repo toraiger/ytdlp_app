@@ -11,6 +11,8 @@ on:
       - 'assets/**'
       - 'pubspec.yaml'
       - 'pubspec.lock'
+      - 'scripts/build_app.sh'
+      - 'scripts/flutterw'
 
 permissions:
   contents: read
@@ -22,6 +24,8 @@ jobs:
     env:
       DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
       COCOAPODS_DISABLE_STATS: 'true'
+      MIX_BUILD_NUMBER: ${{ github.run_number }}
+      MIX_APP_REVISION: ${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,7 +41,7 @@ jobs:
           cache: true
       - run: flutter pub get --enforce-lockfile
       - name: Build release app for iPhone without signing
-        run: flutter build ios --release --no-codesign --no-pub
+        run: bash scripts/build_app.sh ios --release --no-codesign --no-pub
       - name: Package unsigned IPA
         run: |
           set -euo pipefail
@@ -45,18 +49,24 @@ jobs:
           plutil -lint "$app/Info.plist"
           /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist"
           /usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$app/Info.plist"
+          mix_version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Info.plist")
+          mix_number=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Info.plist")
+          test "$mix_number" = "$MIX_BUILD_NUMBER"
+          mix_ipa="MixPlayer-${mix_version}-${mix_number}-${MIX_APP_REVISION:0:7}-unsigned.ipa"
           xcrun lipo "$app/Runner" -verify_arch arm64
           mkdir -p build/ios/ipa/Payload
           ditto "$app" build/ios/ipa/Payload/Runner.app
           cd build/ios/ipa
-          zip -q -r -y MixPlayer-unsigned.ipa Payload
-          zip -T MixPlayer-unsigned.ipa
-          shasum -a 256 MixPlayer-unsigned.ipa > MixPlayer-unsigned.ipa.sha256
+          zip -q -r -y "$mix_ipa" Payload
+          zip -T "$mix_ipa"
+          shasum -a 256 "$mix_ipa" > "$mix_ipa.sha256"
+          printf 'Version: %s\nBuild: %s\nCommit: %s\n' "$mix_version" "$mix_number" "$MIX_APP_REVISION" > BUILD-INFO.txt
       - uses: actions/upload-artifact@v4
         with:
           name: mix-player-ios-unsigned-ipa
           path: |
-            build/ios/ipa/MixPlayer-unsigned.ipa
-            build/ios/ipa/MixPlayer-unsigned.ipa.sha256
+            build/ios/ipa/*.ipa
+            build/ios/ipa/*.ipa.sha256
+            build/ios/ipa/BUILD-INFO.txt
           if-no-files-found: error
           compression-level: 0
