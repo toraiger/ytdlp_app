@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:mix_player_app/player_app.dart';
@@ -9,13 +10,23 @@ import 'package:mix_player_app/services/app_settings.dart';
 import 'support/fakes.dart';
 
 void main() {
-  Future<void> launch(WidgetTester tester, MemorySettings settings) async {
+  Future<void> launch(
+    WidgetTester tester,
+    MemorySettings settings, {
+    FakeAudioEngine? audio,
+  }) async {
     await tester.pumpWidget(
       PlayerApp(
         settings: settings,
-        audioEngine: FakeAudioEngine(),
+        audioEngine: audio ?? FakeAudioEngine(),
         apiFactory:
-            (_, __) => mockApi((_) => jsonResponse(mixJson(['a', 'b']))),
+            (_, __) => mockApi(
+              (request) => jsonResponse(
+                request.url.path == '/stream'
+                    ? streamJson(jsonDecode(request.body)['video_id'] as String)
+                    : mixJson(['a', 'b']),
+              ),
+            ),
       ),
     );
     await tester.pumpAndSettle();
@@ -212,4 +223,111 @@ void main() {
     await launch(tester, MemorySettings());
     expect(tester.takeException(), isNull);
   });
+  testWidgets(
+    'Dragging previews time and seeks only when the thumb is released',
+    (tester) async {
+      final audio = FakeAudioEngine();
+      final settings =
+          MemorySettings()
+            ..snapshot = const SettingsSnapshot(
+              serverUrl: 'https://api.example.test',
+              apiKey: 'test',
+            );
+      await launch(tester, settings, audio: audio);
+      await tester.ensureVisible(find.text('Mix を20曲取得'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Mix を20曲取得'));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Track a'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Track a'));
+      await tester.pumpAndSettle();
+      var seeks = 0;
+      audio.onSeek = (_) => seeks++;
+      final slider = find.byType(Slider);
+      final gesture = await tester.startGesture(tester.getCenter(slider));
+      await gesture.moveBy(const Offset(40, 0));
+      await tester.pump();
+      expect(seeks, 0);
+      final preview = tester.widget<Slider>(slider).value;
+      expect(preview, greaterThan(20000));
+      audio.positionEvents.add(const Duration(seconds: 20));
+      await tester.pump();
+      expect(tester.widget<Slider>(slider).value, preview);
+      await gesture.up();
+      await tester.pumpAndSettle();
+      expect(seeks, 1);
+      expect(audio.lastSeek!.inMilliseconds, preview.round());
+      seeks = 0;
+      final interrupted = await tester.startGesture(tester.getCenter(slider));
+      await interrupted.moveBy(const Offset(20, 0));
+      await tester.pump();
+      audio.advance(1);
+      await tester.pump();
+      await interrupted.up();
+      await tester.pumpAndSettle();
+      expect(seeks, 0);
+      expect(audio.snapshot.index, 1);
+      expect(tester.widget<Slider>(slider).value, 0);
+      expect(tester.takeException(), isNull);
+    },
+  );
+  testWidgets(
+    'Playback report distinguishes media and list durations without secrets',
+    (tester) async {
+      String? copied;
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        (call) async {
+          if (call.method == 'Clipboard.setData') {
+            copied = (call.arguments as Map)['text'] as String;
+          }
+          return null;
+        },
+      );
+      addTearDown(() {
+        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+          SystemChannels.platform,
+          null,
+        );
+      });
+      final audio = FakeAudioEngine();
+      final settings =
+          MemorySettings()
+            ..snapshot = const SettingsSnapshot(
+              serverUrl: 'https://api.example.test',
+              apiKey: 'do-not-copy-api-key',
+            );
+      await launch(tester, settings, audio: audio);
+      await tester.ensureVisible(find.text('Mix を20曲取得'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Mix を20曲取得'));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('Track a'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Track a'));
+      await tester.pumpAndSettle();
+      audio.durationEvents.add(const Duration(seconds: 427));
+      audio.positionEvents.add(const Duration(seconds: 320));
+      await tester.pump();
+      await tester.tap(find.byTooltip('API サーバー設定'));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('再生情報'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('再生情報'));
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('再生情報をコピー'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('再生情報をコピー'));
+      await tester.pumpAndSettle();
+      expect(copied, contains('一覧の長さ: 02:00'));
+      expect(copied, contains('メディアの長さ: 07:07'));
+      expect(copied, contains('メディアの経過時間: 05:20'));
+      expect(copied, contains('プレーヤー内の曲番号: 1'));
+      expect(copied, isNot(contains('do-not-copy-api-key')));
+      expect(copied, isNot(contains('https://')));
+      expect(copied, isNot(contains('Track a')));
+      expect(tester.takeException(), isNull);
+    },
+  );
 }

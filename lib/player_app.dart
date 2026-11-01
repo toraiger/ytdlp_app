@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
 
 import 'build_info.dart';
@@ -138,6 +139,7 @@ class _PlayerScreenState extends State<_PlayerScreen>
       builder:
           (_) => _ConnectionDialog(
             initial: _settings,
+            playback: _playback,
             api: _mix.isConfigured ? _mix.api : null,
             onSave: (url, key) async {
               ApiClient.validateServerUrl(url);
@@ -709,14 +711,66 @@ String formatTime(Duration? duration) {
   return '$minutes:$remainder';
 }
 
-class _MiniPlayer extends StatelessWidget {
+class _MiniPlayer extends StatefulWidget {
   const _MiniPlayer({required this.playback});
   final PlaybackController playback;
+  @override
+  State<_MiniPlayer> createState() => _MiniPlayerState();
+}
+
+class _MiniPlayerState extends State<_MiniPlayer> {
+  PlaybackController get playback => widget.playback;
+  Duration? _seekPreview;
+  MixTrack? _previewTrack;
+  int? _previewRevision;
+  PlaybackMode? _previewMode;
+  int _previewRequest = 0;
+
+  bool get _previewIsCurrent =>
+      identical(_previewTrack, playback.currentTrack) &&
+      _previewRevision == playback.playbackRevision &&
+      _previewMode == playback.mode &&
+      !playback.isBusy;
+
+  @override
+  void didUpdateWidget(covariant _MiniPlayer oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (_seekPreview != null && !_previewIsCurrent) {
+      _seekPreview = null;
+      _previewRequest++;
+    }
+  }
+
+  void _beginSeek(double value) {
+    _previewRequest++;
+    setState(() {
+      _previewTrack = playback.currentTrack;
+      _previewRevision = playback.playbackRevision;
+      _previewMode = playback.mode;
+      _seekPreview = Duration(milliseconds: value.round());
+    });
+  }
+
+  void _previewSeek(double value) {
+    if (!_previewIsCurrent) return;
+    setState(() => _seekPreview = Duration(milliseconds: value.round()));
+  }
+
+  Future<void> _commitSeek(double value) async {
+    if (_seekPreview == null || !_previewIsCurrent) return;
+    final request = _previewRequest;
+    await playback.seek(Duration(milliseconds: value.round()));
+    if (mounted && request == _previewRequest) {
+      setState(() => _seekPreview = null);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final track = playback.currentTrack;
     final enabled = track != null && !playback.isBusy;
     final duration = playback.duration.inMilliseconds.toDouble();
+    final shownPosition = _seekPreview ?? playback.position;
     return Container(
       decoration: const BoxDecoration(
         color: Color(0xFF101F30),
@@ -783,15 +837,17 @@ class _MiniPlayer extends StatelessWidget {
                       value:
                           duration <= 0
                               ? 0
-                              : playback.position.inMilliseconds
-                                  .toDouble()
-                                  .clamp(0, duration),
+                              : shownPosition.inMilliseconds.toDouble().clamp(
+                                0,
+                                duration,
+                              ),
                       max: duration <= 0 ? 1 : duration,
-                      onChanged:
+                      onChangeStart:
+                          enabled && duration > 0 ? _beginSeek : null,
+                      onChanged: enabled && duration > 0 ? _previewSeek : null,
+                      onChangeEnd:
                           enabled && duration > 0
-                              ? (value) => playback.seek(
-                                Duration(milliseconds: value.round()),
-                              )
+                              ? (value) => unawaited(_commitSeek(value))
                               : null,
                       semanticFormatterCallback:
                           (value) =>
@@ -849,7 +905,7 @@ class _MiniPlayer extends StatelessWidget {
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       Text(
-                        formatTime(playback.position),
+                        formatTime(shownPosition),
                         style: const TextStyle(color: _muted, fontSize: 10),
                       ),
                       Text(
@@ -871,10 +927,12 @@ class _MiniPlayer extends StatelessWidget {
 class _ConnectionDialog extends StatefulWidget {
   const _ConnectionDialog({
     required this.initial,
+    required this.playback,
     required this.onSave,
     this.api,
   });
   final SettingsSnapshot initial;
+  final PlaybackController playback;
   final ApiClient? api;
   final Future<void> Function(String url, String key) onSave;
   @override
@@ -996,6 +1054,8 @@ class _ConnectionDialogState extends State<_ConnectionDialog> {
                           ),
                     ),
                   ),
+                const SizedBox(height: 12),
+                _PlaybackDetails(playback: widget.playback),
                 if (_error != null)
                   Padding(
                     padding: const EdgeInsets.only(top: 14),
@@ -1017,6 +1077,48 @@ class _ConnectionDialogState extends State<_ConnectionDialog> {
         ),
       ],
     ),
+  );
+}
+
+class _PlaybackDetails extends StatelessWidget {
+  const _PlaybackDetails({required this.playback});
+  final PlaybackController playback;
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+    animation: playback,
+    builder: (context, _) {
+      final info = playback.diagnostics;
+      final report = [
+        'Mix Player $appVersionLabel',
+        if (appRevision.isNotEmpty) 'コミット $appRevision',
+        '再生方式: ${info.mode == PlaybackMode.audio ? '音声' : '動画'}',
+        '一覧の曲番号: ${info.listIndex == null ? '—' : info.listIndex! + 1}',
+        'プレーヤー内の曲番号: ${info.playerIndex == null ? '—' : info.playerIndex! + 1}',
+        'キュー内の曲数: ${info.queueLength}',
+        '一覧の長さ: ${formatTime(info.listDuration)}',
+        'メディアの長さ: ${formatTime(info.mediaDuration)}',
+        'メディアの経過時間: ${formatTime(info.mediaPosition)}',
+      ].join('\n');
+      return ExpansionTile(
+        tilePadding: EdgeInsets.zero,
+        title: const Text('再生情報', style: TextStyle(fontSize: 13)),
+        children: [
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Text(
+              report,
+              style: const TextStyle(color: _muted, fontSize: 12, height: 1.6),
+            ),
+          ),
+          TextButton.icon(
+            onPressed: () => Clipboard.setData(ClipboardData(text: report)),
+            icon: const Icon(Icons.copy_rounded, size: 16),
+            label: const Text('再生情報をコピー'),
+          ),
+        ],
+      );
+    },
   );
 }
 

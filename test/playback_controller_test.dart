@@ -400,6 +400,56 @@ void main() {
     expect(audio.lastSeek, const Duration(seconds: 120));
   });
   test(
+    'A queued seek cannot change the next track after auto advance',
+    () async {
+      final appended = Completer<void>();
+      audio.onAppend = (_) => appended.future;
+      await playback.playTrack(0);
+      await drain();
+      final seeking = playback.seek(const Duration(seconds: 40));
+      audio.advance(1);
+      appended.complete();
+      await seeking;
+      await drain();
+      expect(playback.currentIndex, 1);
+      expect(audio.lastSeek, isNull);
+      expect(playback.position, Duration.zero);
+    },
+  );
+  test(
+    'Only the latest seek waiting behind a queue update is applied',
+    () async {
+      final appended = Completer<void>();
+      audio.onAppend = (_) => appended.future;
+      var seeks = 0;
+      audio.onSeek = (_) => seeks++;
+      await playback.playTrack(0);
+      await drain();
+      final requests = [
+        playback.seek(const Duration(seconds: 10)),
+        playback.seek(const Duration(seconds: 20)),
+        playback.seek(const Duration(seconds: 30)),
+      ];
+      appended.complete();
+      await Future.wait(requests);
+      expect(seeks, 1);
+      expect(audio.lastSeek, const Duration(seconds: 30));
+    },
+  );
+  test(
+    'Unknown native duration uses the current tracks listed duration',
+    () async {
+      await playback.playTrack(0);
+      await drain();
+      audio.durationEvents.add(null);
+      expect(playback.duration, const Duration(seconds: 120));
+      expect(playback.diagnostics.mediaDuration, isNull);
+      expect(playback.diagnostics.listDuration, const Duration(seconds: 120));
+      audio.positionEvents.add(const Duration(seconds: 999));
+      expect(playback.position, const Duration(seconds: 999));
+    },
+  );
+  test(
     'Direct playback makes no stream requests and has no next track',
     () async {
       await playback.playDirect(

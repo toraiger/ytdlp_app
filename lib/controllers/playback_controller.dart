@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:video_player/video_player.dart';
 
 import '../models/api_models.dart';
+import '../models/playback_diagnostics.dart';
 import '../services/api_client.dart';
 import '../services/playback_engines.dart';
 import '../services/startup_timing.dart';
@@ -43,6 +44,7 @@ class PlaybackController extends ChangeNotifier {
   VideoEngine? _video;
   int _generation = 0;
   int _selection = 0;
+  int _seekRevision = 0;
   int? _fillingGeneration;
   int? _completedGeneration;
   int? _attemptedExtendLength;
@@ -72,6 +74,25 @@ class PlaybackController extends ChangeNotifier {
 
   VideoPlayerController? get videoController => _video?.controller;
   int get upcomingCount => (_queue.length - _queueIndex - 1).clamp(0, 2);
+  int get playbackRevision => _selection;
+
+  PlaybackDiagnostics get diagnostics {
+    final audio = mode == PlaybackMode.audio ? _audio.snapshot : null;
+    final video = mode == PlaybackMode.video ? _video?.value : null;
+    return PlaybackDiagnostics(
+      mode: mode,
+      queueLength: mode == PlaybackMode.audio ? _queue.length : 0,
+      listIndex: currentIndex,
+      playerIndex: currentTrack == null ? null : audio?.index,
+      listDuration: currentTrack?.duration,
+      mediaDuration:
+          currentTrack == null ? null : audio?.duration ?? video?.duration,
+      mediaPosition:
+          currentTrack == null
+              ? Duration.zero
+              : audio?.position ?? video?.position ?? Duration.zero,
+    );
+  }
 
   bool _isCurrent(int generation) => !_disposed && generation == _generation;
   void _notify() {
@@ -536,8 +557,8 @@ class PlaybackController extends ChangeNotifier {
     _queueIndex = index;
     currentTrack = entry.track;
     currentIndex = entry.mixIndex;
-    position = snapshot.position;
-    duration = snapshot.duration ?? Duration.zero;
+    duration = _trackDuration(snapshot.duration);
+    position = _nonNegativePosition(snapshot.position);
     _recordFirstProgress();
     if (changed) {
       _completedGeneration = null;
@@ -564,8 +585,8 @@ class PlaybackController extends ChangeNotifier {
   void _onVideoChanged() {
     final value = _video?.value;
     if (value == null || mode != PlaybackMode.video) return;
-    position = value.position;
-    duration = value.duration;
+    duration = _trackDuration(value.duration);
+    position = _nonNegativePosition(value.position);
     isPlaying = value.playing;
     _recordFirstProgress();
     if (value.hasError) {
@@ -648,6 +669,19 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> seek(Duration value) async {
     if (currentTrack == null || isBusy) return;
+    final generation = _generation;
+    final selection = _selection;
+    final request = ++_seekRevision;
+    final track = currentTrack;
+    final requestedMode = mode;
+    final index = _queueIndex;
+    final video = _video;
+    bool isCurrent() =>
+        _isSelectionCurrent(generation, selection) &&
+        request == _seekRevision &&
+        identical(currentTrack, track) &&
+        mode == requestedMode &&
+        !isBusy;
     final safe =
         value < Duration.zero
             ? Duration.zero
@@ -655,16 +689,34 @@ class PlaybackController extends ChangeNotifier {
             ? duration
             : value;
     try {
-      if (mode == PlaybackMode.audio) {
-        await _mutateAudio(_generation, () => _audio.seek(safe));
+      if (requestedMode == PlaybackMode.audio) {
+        await _mutateAudio(generation, () async {
+          if (isCurrent() && _audio.snapshot.index == index) {
+            await _audio.seek(safe, index: index);
+          }
+        });
+        if (isCurrent()) _syncAudioProgress();
       } else {
-        await _video?.seek(safe);
+        if (isCurrent() && identical(_video, video)) {
+          await video?.seek(safe);
+          if (isCurrent()) _onVideoChanged();
+        }
       }
     } catch (_) {
-      error = '再生位置を変更できません。';
-      _notify();
+      if (isCurrent()) {
+        error = '再生位置を変更できません。';
+        _notify();
+      }
     }
   }
+
+  Duration _trackDuration(Duration? reported) =>
+      reported != null && reported > Duration.zero
+          ? reported
+          : currentTrack?.duration ?? Duration.zero;
+
+  Duration _nonNegativePosition(Duration value) =>
+      value < Duration.zero ? Duration.zero : value;
 
   Future<void> pauseVideoForBackground() async {
     _videoForeground = false;
