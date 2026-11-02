@@ -66,6 +66,8 @@ bash scripts/build_app.sh ios --release --no-codesign --no-pub
 
 この IPA は SideStore や Sideloadly で自分の Apple Account を使って再署名してインストールします。無料アカウントの署名期限は7日間で、継続利用には更新が必要です。署名なしの IPA を iPhone で開くだけではインストールできません。iOS の Bundle Identifier は jp.toraiger.mixPlayerApp です。実機でのインストールと音声再生は別途確認してください。
 
+この手順は再利用できるCodexスキルとして保存しています。[スキルの導入・使い方](.agents/skills/flutter-ios-unsigned-ipa/README.md)と[他の環境向けZIP](packages/flutter-ios-unsigned-ipa.zip)を参照してください。導入した環境では `$flutter-ios-unsigned-ipa` で呼び出せ、他のFlutterアプリにも利用できます。
+
 ### アプリを更新したか確認する
 
 新版を入れる際はZIPを展開し、SideStoreの My Apps →「＋」から新しい番号のIPAを選び、これまでと同じApple Accountで上書きインストールします。SideStoreの Refresh はインストール済みアプリの署名を更新する操作です。
