@@ -5,6 +5,7 @@ import 'package:video_player/video_player.dart';
 
 import '../models/api_models.dart';
 import '../models/playback_diagnostics.dart';
+import '../models/youtube_video_page.dart';
 import '../services/api_client.dart';
 import '../services/playback_engines.dart';
 import '../services/startup_timing.dart';
@@ -59,6 +60,7 @@ class PlaybackController extends ChangeNotifier {
   bool _firstMediaLoading = false;
   bool _canRefreshCurrent = false;
   bool _playbackFailed = false;
+  bool _isYoutubeSingle = false;
   String? _pendingAudioError;
 
   PlaybackMode mode = PlaybackMode.audio;
@@ -148,25 +150,56 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> _startTrack(
     MixTrack track,
-    int index, {
+    int? index, {
     bool refresh = false,
   }) async {
     final requestedMode = mode;
+    final api = mix.api;
+    var resolvedTrack = track;
     await _start(
       track,
       mixIndex: index,
       refresh: refresh,
-      cached: mix.api.cachedMedia(track.videoId, requestedMode) != null,
+      cached: api.cachedMedia(track.videoId, requestedMode) != null,
+      usesApi: true,
+      resolvedTrack: () => resolvedTrack,
       resolve: (refresh) async {
-        final response = await mix.api.resolveStream(
+        final response = await api.resolveStream(
           track.videoId,
           mode: requestedMode,
           refresh: refresh,
         );
+        if (index == null) {
+          resolvedTrack = MixTrack(
+            videoId: track.videoId,
+            title: response.title ?? track.title,
+            channel: 'YouTube',
+            webpageUrl: track.webpageUrl,
+          );
+        }
         return requestedMode == PlaybackMode.audio
             ? response.audio
             : response.videoAudio;
       },
+    );
+  }
+
+  Future<void> playYoutubeVideo(String videoId) async {
+    if (!YoutubeVideoPage.isVideoId(videoId) || !mix.isConfigured) {
+      error = 'YouTube動画とAPIサーバー設定を確認してください。';
+      _notify();
+      return;
+    }
+    final page = YoutubeVideoPage(videoId: videoId);
+    await _startTrack(
+      MixTrack(
+        videoId: videoId,
+        title: 'YouTube動画',
+        channel: 'YouTube',
+        webpageUrl: page.uri,
+      ),
+      null,
+      refresh: _playbackFailed && currentTrack?.videoId == videoId,
     );
   }
 
@@ -193,6 +226,8 @@ class PlaybackController extends ChangeNotifier {
     required Future<StreamFormat?> Function(bool refresh) resolve,
     bool refresh = false,
     bool cached = false,
+    bool usesApi = false,
+    MixTrack Function()? resolvedTrack,
   }) async {
     final generation = ++_generation;
     final selection = ++_selection;
@@ -209,8 +244,9 @@ class PlaybackController extends ChangeNotifier {
     currentTrack = track;
     currentIndex = mixIndex;
     isDirect = mixIndex == null;
+    _isYoutubeSingle = usesApi && isDirect;
     isBusy = true;
-    isResolvingUrl = mixIndex != null && (refresh || !cached);
+    isResolvingUrl = usesApi && (refresh || !cached);
     isPlaying = false;
     position = Duration.zero;
     duration = Duration.zero;
@@ -234,6 +270,8 @@ class PlaybackController extends ChangeNotifier {
       if (media == null || uri == null) {
         throw const ApiFailure('この曲に再生可能な HTTPS URL がありません。別の曲をお試しください。');
       }
+      track = resolvedTrack?.call() ?? track;
+      currentTrack = track;
       resolvedMedia = true;
       isResolvingUrl = false;
       _pendingAudioError = null;
@@ -270,6 +308,8 @@ class PlaybackController extends ChangeNotifier {
             mixIndex: mixIndex,
             resolve: resolve,
             refresh: true,
+            usesApi: usesApi,
+            resolvedTrack: resolvedTrack,
           );
           return;
         }
@@ -365,9 +405,9 @@ class PlaybackController extends ChangeNotifier {
       _pendingAudioError = value;
       return;
     }
-    if (_canRefreshCurrent && !isDirect && currentIndex != null) {
+    if (_canRefreshCurrent && (!isDirect || _isYoutubeSingle)) {
       _canRefreshCurrent = false;
-      unawaited(_startTrack(currentTrack!, currentIndex!, refresh: true));
+      unawaited(_startTrack(currentTrack!, currentIndex, refresh: true));
       return;
     }
     error = value;
@@ -469,7 +509,8 @@ class PlaybackController extends ChangeNotifier {
       _preparedApi = null;
       return;
     }
-    if (mode == PlaybackMode.audio &&
+    if (mix.prepareFirstTrackOnLoad &&
+        mode == PlaybackMode.audio &&
         currentTrack == null &&
         !isBusy &&
         (_preparedSession != mix.sessionId || _preparedApi != mix.api)) {
@@ -759,6 +800,7 @@ class PlaybackController extends ChangeNotifier {
     currentTrack = null;
     currentIndex = null;
     isDirect = false;
+    _isYoutubeSingle = false;
     isPlaying = false;
     isBusy = false;
     isResolvingUrl = false;
