@@ -7,6 +7,7 @@
 ## 実装した機能
 
 - HTTPS API URL と X-API-Key の設定。API キーは iOS Keychain / Android の安全なストレージに保存します。
+- YouTubeのウェブで選んだ動画を、ページ移動後にアプリで再生。通常動画は単曲、ミックスは連続再生し、ページも再生曲に追従します。
 - iPhoneのWebViewログイン、Netscape形式Cookieファイルの取込とAPIへの登録・保存状態確認。
 - YouTube Mix の20曲取得、サムネイル・タイトル・チャンネル・長さの表示。
 - Mix取得後に先頭曲の音声を事前に読み込み、タップ時に同じ準備を再利用。自動再生はしません。
@@ -98,6 +99,12 @@ bash scripts/build_app.sh apk --release --no-pub
 APK の生成先は build/app/outputs/flutter-apk/ 内の app-debug.apk と app-release.apk です。app-release.apk はリリースモードで最適化されますが、現時点ではテスト用の鍵で署名します。ストア配布用の独自署名鍵は未設定です。
 
 GitHub Actions の Flutter checks でも両方をビルドします。GitHub にログインして成功した実行の Artifacts から mix-player-debug-apk または mix-player-release-apk をダウンロードし、ZIP 内の APK を取り出してください。Actions の Run workflow から手動で再ビルドすることもできます。
+
+## YouTubeのウェブから再生
+
+API設定を保存して「YouTubeを開く」を押し、動画を選びます。その動画ページへ移動した後、アプリのプレーヤーで再生します。YouTubeページは表示したままで、下部の操作バーを使えます。
+
+通常の動画は1本、YouTubeのミックスを選んだ場合は20曲取得して連続再生します。Mixの次曲・前曲に合わせてページも移動し、音声／動画のモードはメイン画面の選択を引き継ぎます。[詳しい操作と動作](docs/youtube-web-playback.md)を参照してください。
 
 ## YouTubeにログインしてMixを取得
 

@@ -1,16 +1,20 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:video_player/video_player.dart';
 
 import 'build_info.dart';
 import 'controllers/mix_controller.dart';
 import 'controllers/playback_controller.dart';
+import 'controllers/youtube_playback_controller.dart';
 import 'models/api_models.dart';
 import 'models/api_timing.dart';
 import 'models/native_playback_timing.dart';
 import 'models/playback_diagnostics.dart';
 import 'screens/youtube_cookies_screen.dart';
+import 'screens/youtube_browser_screen.dart';
+import 'widgets/youtube_webview.dart';
 import 'services/api_client.dart';
 import 'services/app_settings.dart';
 import 'services/playback_engines.dart';
@@ -29,11 +33,13 @@ class PlayerApp extends StatelessWidget {
     this.audioEngine,
     this.apiFactory,
     this.youtubeCookieSource,
+    this.youtubeBrowserBuilder,
   });
   final SettingsStore settings;
   final AudioEngine? audioEngine;
   final ApiClientFactory? apiFactory;
   final YoutubeCookieSource? youtubeCookieSource;
+  final YoutubeBrowserBuilder? youtubeBrowserBuilder;
 
   @override
   Widget build(BuildContext context) => MaterialApp(
@@ -78,6 +84,7 @@ class PlayerApp extends StatelessWidget {
       apiFactory:
           apiFactory ?? (url, key) => ApiClient(serverUrl: url, apiKey: key),
       youtubeCookieSource: youtubeCookieSource,
+      youtubeBrowserBuilder: youtubeBrowserBuilder,
     ),
   );
 }
@@ -88,11 +95,13 @@ class _PlayerScreen extends StatefulWidget {
     required this.apiFactory,
     this.audioEngine,
     this.youtubeCookieSource,
+    this.youtubeBrowserBuilder,
   });
   final SettingsStore settings;
   final ApiClientFactory apiFactory;
   final AudioEngine? audioEngine;
   final YoutubeCookieSource? youtubeCookieSource;
+  final YoutubeBrowserBuilder? youtubeBrowserBuilder;
   @override
   State<_PlayerScreen> createState() => _PlayerScreenState();
 }
@@ -102,6 +111,7 @@ class _PlayerScreenState extends State<_PlayerScreen>
   final _url = TextEditingController(text: defaultMixUrl);
   final _mix = MixController();
   late final PlaybackController _playback;
+  late final YoutubePlaybackController _youtube;
   SettingsSnapshot _settings = const SettingsSnapshot();
   bool _initializing = true;
   String? _settingsError;
@@ -114,6 +124,7 @@ class _PlayerScreenState extends State<_PlayerScreen>
       mix: _mix,
       audio: widget.audioEngine ?? JustAudioEngine(),
     );
+    _youtube = YoutubePlaybackController(mix: _mix, playback: _playback);
     unawaited(_bootstrap());
   }
 
@@ -153,6 +164,7 @@ class _PlayerScreenState extends State<_PlayerScreen>
             onSave: (url, key) async {
               ApiClient.validateServerUrl(url);
               await widget.settings.saveConnection(serverUrl: url, apiKey: key);
+              _youtube.cancelSelection();
               await _playback.stop();
               if (!mounted) return;
               _mix.configure(widget.apiFactory(url, key));
@@ -191,7 +203,22 @@ class _PlayerScreenState extends State<_PlayerScreen>
     }
   }
 
+  Future<void> _showYoutube() async {
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder:
+            (_) => YoutubeBrowserScreen(
+              controller: _youtube,
+              playback: _playback,
+              playerControlsBuilder: (_) => _MiniPlayer(playback: _playback),
+              browserBuilder: widget.youtubeBrowserBuilder,
+            ),
+      ),
+    );
+  }
+
   Future<void> _load() async {
+    _youtube.reset();
     FocusManager.instance.primaryFocus?.unfocus();
     await _playback.stop();
     final loaded = await _mix.load(_url.text);
@@ -211,13 +238,17 @@ class _PlayerScreenState extends State<_PlayerScreen>
       context: context,
       builder: (_) => const _DirectDialog(),
     );
-    if (result != null && mounted) await _playback.playDirect(result);
+    if (result != null && mounted) {
+      _youtube.reset();
+      await _playback.playDirect(result);
+    }
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _url.dispose();
+    _youtube.dispose();
     _playback.dispose();
     _mix.dispose();
     super.dispose();
@@ -521,7 +552,10 @@ class _PlayerScreenState extends State<_PlayerScreen>
           onSelectionChanged:
               _playback.isBusy
                   ? null
-                  : (selection) => _playback.setMode(selection.first),
+                  : (selection) {
+                    _youtube.cancelSelection();
+                    unawaited(_playback.setMode(selection.first));
+                  },
           showSelectedIcon: false,
           style: const ButtonStyle(visualDensity: VisualDensity.compact),
         ),
@@ -546,6 +580,17 @@ class _PlayerScreenState extends State<_PlayerScreen>
               icon: const Icon(Icons.playlist_play_rounded, size: 20),
               label: Text(_mix.isLoading ? 'Mix を取得中…' : 'Mix を20曲取得'),
             ),
+            if (!kIsWeb &&
+                const [
+                  TargetPlatform.iOS,
+                  TargetPlatform.android,
+                ].contains(defaultTargetPlatform))
+              OutlinedButton.icon(
+                onPressed:
+                    _initializing || !_mix.isConfigured ? null : _showYoutube,
+                icon: const Icon(Icons.ondemand_video_rounded, size: 18),
+                label: const Text('YouTubeを開く'),
+              ),
             TextButton.icon(
               onPressed: _initializing ? null : _direct,
               icon: const Icon(Icons.science_outlined, size: 17),

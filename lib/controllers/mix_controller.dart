@@ -9,6 +9,7 @@ class MixController extends ChangeNotifier {
   List<MixTrack> _items = [];
   int _generation = 0;
   bool _disposed = false;
+  bool prepareFirstTrackOnLoad = true;
   bool isLoading = false;
   bool isExtending = false;
   String? error;
@@ -38,7 +39,18 @@ class MixController extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<bool> load(String url) async {
+  /// Invalidate an outstanding load without allowing its response to replace
+  /// the list after a different YouTube video has been selected.
+  void cancelLoading() {
+    if (!isLoading && !isExtending) return;
+    prepareFirstTrackOnLoad = false;
+    _generation++;
+    isLoading = false;
+    isExtending = false;
+    notifyListeners();
+  }
+
+  Future<bool> load(String url, {bool prepareFirstTrack = true}) async {
     final uri = Uri.tryParse(url.trim());
     if (uri == null ||
         uri.scheme != 'https' ||
@@ -55,6 +67,7 @@ class MixController extends ChangeNotifier {
       return false;
     }
     final generation = ++_generation;
+    prepareFirstTrackOnLoad = prepareFirstTrack;
     isLoading = true;
     isExtending = false;
     error = null;
