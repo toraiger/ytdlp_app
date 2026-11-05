@@ -1,7 +1,9 @@
 enum ApiOperation {
   mix('Mix取得'),
   stream('再生URL取得'),
-  extend('曲の追加取得');
+  extend('曲の追加取得'),
+  youtubeCookieUpload('Cookie登録'),
+  youtubeCookieStatus('Cookie保存状態の確認');
 
   const ApiOperation(this.label);
   final String label;

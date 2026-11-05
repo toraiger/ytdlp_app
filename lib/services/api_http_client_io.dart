@@ -15,6 +15,6 @@ http.Client createApiHttpClient() {
         ..cache = null
         ..requestCachePolicy =
             NSURLRequestCachePolicy.NSURLRequestReloadIgnoringLocalCacheData
-        ..timeoutIntervalForRequest = const Duration(seconds: 90);
+        ..timeoutIntervalForRequest = const Duration(seconds: 120);
   return CupertinoClient.fromSessionConfiguration(configuration);
 }

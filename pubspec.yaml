@@ -1,7 +1,7 @@
 name: mix_player_app
 description: YouTube Mix を既存の HTTPS API と連携して再生する Flutter クライアント。
 publish_to: none
-version: 0.1.2+3
+version: 0.2.0+4
 
 environment:
   sdk: '>=3.7.0 <4.0.0'
@@ -12,6 +12,8 @@ dependencies:
     sdk: flutter
   http: 1.6.0
   cupertino_http: 2.4.0
+  flutter_inappwebview: 6.1.5
+  file_selector: 1.0.3
   just_audio: 0.10.6
   just_audio_background: 0.0.1-beta.17
   audio_session: 0.2.4

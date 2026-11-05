@@ -6,6 +6,7 @@ import 'package:http/http.dart' as http;
 
 import '../models/api_models.dart';
 import '../models/api_timing.dart';
+import '../models/youtube_cookies.dart';
 import 'api_http_client.dart';
 import 'startup_timing.dart';
 
@@ -55,6 +56,42 @@ class ApiClient {
   final _streams = <String, _CachedStream>{};
   final _resolving = <String, Future<StreamResponse>>{};
   bool _closed = false;
+  bool get hasApiKey => _apiKey.isNotEmpty;
+
+  Future<YoutubeCookieStatus> youtubeCookieStatus() async =>
+      _decodeCookieStatus(
+        await _requestJson('GET', [
+          'youtube',
+          'cookies',
+        ], operation: ApiOperation.youtubeCookieStatus),
+      );
+
+  Future<YoutubeCookieStatus> uploadYoutubeCookies(
+    YoutubeCookies cookies,
+  ) async {
+    final result = _decodeCookieStatus(
+      await _requestJson(
+        'PUT',
+        ['youtube', 'cookies'],
+        rawBody: cookies.toNetscape(),
+        contentType: 'text/plain',
+        operation: ApiOperation.youtubeCookieUpload,
+        requestTimeout: const Duration(seconds: 120),
+      ),
+    );
+    if (!result.configured) {
+      throw const ApiFailure('Cookieの登録が完了しませんでした。保存状態を確認してください。');
+    }
+    return result;
+  }
+
+  YoutubeCookieStatus _decodeCookieStatus(Map<String, dynamic> json) {
+    try {
+      return YoutubeCookieStatus.fromJson(json);
+    } on FormatException {
+      throw const ApiFailure('Cookie保存状態の応答形式が正しくありません。');
+    }
+  }
 
   StreamFormat? cachedMedia(String videoId, PlaybackMode mode) {
     final cached = _cachedStream(videoId, mode);
@@ -166,7 +203,20 @@ class ApiClient {
   Future<Map<String, dynamic>> _post(
     List<String> path,
     Map<String, dynamic> body,
-  ) async {
+  ) => _requestJson('POST', path, rawBody: jsonEncode(body));
+
+  Future<Map<String, dynamic>> _requestJson(
+    String method,
+    List<String> path, {
+    String? rawBody,
+    String contentType = 'application/json',
+    ApiOperation? operation,
+    Duration? requestTimeout,
+  }) async {
+    if (_closed) throw const ApiFailure('API接続が変更されました。画面を開き直してください。');
+    if (operation != null && !hasApiKey) {
+      throw const ApiFailure('Cookieを送信する前にAPIキーを設定してください。');
+    }
     final watch = Stopwatch()..start();
     Duration? toHeaders;
     int? statusCode;
@@ -178,23 +228,26 @@ class ApiClient {
       ],
     );
     final request =
-        http.Request('POST', uri)
+        http.Request(method, uri)
           ..followRedirects = false
           ..headers.addAll({
-            'Content-Type': 'application/json',
+            'Content-Type': contentType,
             'Accept': 'application/json',
             'X-API-Key': _apiKey,
-          })
-          ..body = jsonEncode(body);
+          });
+    if (rawBody != null) request.bodyBytes = utf8.encode(rawBody);
     try {
       final response = await (() async {
         final streamed = await _client.send(request);
         toHeaders = watch.elapsed;
         statusCode = streamed.statusCode;
         return http.Response.fromStream(streamed);
-      })().timeout(timeout);
+      })().timeout(requestTimeout ?? timeout);
       if (response.statusCode < 200 || response.statusCode >= 300) {
         final status = response.statusCode;
+        if (operation != null && (status == 404 || status == 501)) {
+          throw ApiFailure('このサーバーはCookie登録APIに対応していません。', statusCode: status);
+        }
         throw ApiFailure(
           'API エラー（HTTP $status）。サーバー設定と接続状態を確認してください。',
           statusCode: status,
@@ -214,11 +267,12 @@ class ApiClient {
       if (!_closed) {
         lastTiming.value = ApiTiming(
           operation:
-              path.last == 'extend'
+              operation ??
+              (path.last == 'extend'
                   ? ApiOperation.extend
                   : path.first == 'stream'
                   ? ApiOperation.stream
-                  : ApiOperation.mix,
+                  : ApiOperation.mix),
           total: watch.elapsed,
           succeeded: succeeded,
           toHeaders: toHeaders,

@@ -7,6 +7,7 @@
 ## 実装した機能
 
 - HTTPS API URL と X-API-Key の設定。API キーは iOS Keychain / Android の安全なストレージに保存します。
+- iPhoneのWebViewログイン、Netscape形式Cookieファイルの取込とAPIへの登録・保存状態確認。
 - YouTube Mix の20曲取得、サムネイル・タイトル・チャンネル・長さの表示。
 - Mix取得後に先頭曲の音声を事前に読み込み、タップ時に同じ準備を再利用。自動再生はしません。
 - 手動・末尾での追加取得と、video_id による重複排除。
@@ -92,13 +93,21 @@ APK の生成先は build/app/outputs/flutter-apk/ 内の app-debug.apk と app-
 
 GitHub Actions の Flutter checks でも両方をビルドします。GitHub にログインして成功した実行の Artifacts から mix-player-debug-apk または mix-player-release-apk をダウンロードし、ZIP 内の APK を取り出してください。Actions の Run workflow から手動で再ビルドすることもできます。
 
+## YouTubeにログインしてMixを取得
+
+「API サーバー設定」でURLとAPIキーを保存してから「YouTube連携」を開きます。iPhoneではWebViewにログインして「Cookieを取得」、または「Cookieファイルを選択」でNetscape形式のcookies.txtを取り込み、「このサーバーにCookieを登録」を押します。登録後はMixを取得し直してください。
+
+WebViewのログインがGoogleに拒否された場合はファイル取込を利用できます。保存状態のGETはログインの有効性を保証しません。操作・保存範囲・PUT／GET仕様は[YouTube Cookieの登録](docs/youtube-cookie-api.md)を参照してください。
+
 ## API 契約
 
-| エンドポイント | JSON ボディ | 使用する応答 |
+| エンドポイント | リクエスト本文 | 使用する応答 |
 | --- | --- | --- |
 | POST /mix | url, count=20 | session_id, playlist_title, items |
 | POST /mix/{session_id}/extend | count=20 | session_id, items |
 | POST /stream | video_id, include_formats=false | audio.url, video_audio.url |
+| PUT /youtube/cookies | JSONではなくNetscape形式テキスト | configured, updated_at（任意） |
+| GET /youtube/cookies | 本文なし | configured, updated_at（任意） |
 
 `audio.http_headers` と `video_audio.http_headers` は、それぞれの再生 URL に付けるメディア用 HTTP ヘッダーです。現在の曲・音声の先読み・動画再生で維持します。API 認証の `X-API-Key` はメディア配信先に送りません。音声は just_audio のネイティブヘッダー実装を使うため、ローカル HTTP プロキシ用の通信許可は不要です。
 

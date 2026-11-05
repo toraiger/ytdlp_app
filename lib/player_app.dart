@@ -8,9 +8,11 @@ import 'controllers/mix_controller.dart';
 import 'controllers/playback_controller.dart';
 import 'models/api_models.dart';
 import 'models/api_timing.dart';
+import 'screens/youtube_cookies_screen.dart';
 import 'services/api_client.dart';
 import 'services/app_settings.dart';
 import 'services/playback_engines.dart';
+import 'services/youtube_cookie_source.dart';
 
 typedef ApiClientFactory = ApiClient Function(String url, String key);
 const _accent = Color(0xFF80E5CE);
@@ -24,10 +26,12 @@ class PlayerApp extends StatelessWidget {
     required this.settings,
     this.audioEngine,
     this.apiFactory,
+    this.youtubeCookieSource,
   });
   final SettingsStore settings;
   final AudioEngine? audioEngine;
   final ApiClientFactory? apiFactory;
+  final YoutubeCookieSource? youtubeCookieSource;
 
   @override
   Widget build(BuildContext context) => MaterialApp(
@@ -71,6 +75,7 @@ class PlayerApp extends StatelessWidget {
       audioEngine: audioEngine,
       apiFactory:
           apiFactory ?? (url, key) => ApiClient(serverUrl: url, apiKey: key),
+      youtubeCookieSource: youtubeCookieSource,
     ),
   );
 }
@@ -80,10 +85,12 @@ class _PlayerScreen extends StatefulWidget {
     required this.settings,
     required this.apiFactory,
     this.audioEngine,
+    this.youtubeCookieSource,
   });
   final SettingsStore settings;
   final ApiClientFactory apiFactory;
   final AudioEngine? audioEngine;
+  final YoutubeCookieSource? youtubeCookieSource;
   @override
   State<_PlayerScreen> createState() => _PlayerScreenState();
 }
@@ -134,7 +141,7 @@ class _PlayerScreenState extends State<_PlayerScreen>
   }
 
   Future<void> _showSettings() async {
-    await showDialog<void>(
+    final youtube = await showDialog<bool>(
       context: context,
       builder:
           (_) => _ConnectionDialog(
@@ -158,6 +165,28 @@ class _PlayerScreenState extends State<_PlayerScreen>
             },
           ),
     );
+    if (youtube == true && mounted && _mix.isConfigured) {
+      final registered = await Navigator.of(context).push<bool>(
+        MaterialPageRoute(
+          builder:
+              (_) => YoutubeCookiesScreen(
+                api: _mix.api,
+                source:
+                    widget.youtubeCookieSource ?? NativeYoutubeCookieSource(),
+              ),
+        ),
+      );
+      if (registered == true && mounted) {
+        await _playback.stop();
+        if (!mounted) return;
+        _mix.configure(
+          widget.apiFactory(_settings.serverUrl, _settings.apiKey),
+        );
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Cookieを登録しました。Mixを取得し直してください。')),
+        );
+      }
+    }
   }
 
   Future<void> _load() async {
@@ -945,6 +974,11 @@ class _ConnectionDialogState extends State<_ConnectionDialog> {
   late final _key = TextEditingController(text: widget.initial.apiKey);
   bool _saving = false;
   String? _error;
+  bool get _canUseYoutube =>
+      !_saving &&
+      widget.api?.hasApiKey == true &&
+      _server.text.trim() == widget.initial.serverUrl.trim() &&
+      _key.text.trim() == widget.initial.apiKey.trim();
   @override
   void dispose() {
     _server.dispose();
@@ -980,6 +1014,7 @@ class _ConnectionDialogState extends State<_ConnectionDialog> {
         width: 400,
         child: Form(
           key: _form,
+          onChanged: () => setState(() {}),
           child: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -1056,6 +1091,19 @@ class _ConnectionDialogState extends State<_ConnectionDialog> {
                   ),
                 const SizedBox(height: 12),
                 _PlaybackDetails(playback: widget.playback),
+                const SizedBox(height: 12),
+                OutlinedButton.icon(
+                  onPressed:
+                      _canUseYoutube
+                          ? () => Navigator.pop(context, true)
+                          : null,
+                  icon: const Icon(Icons.account_circle_outlined),
+                  label: const Text('YouTube連携'),
+                ),
+                const Text(
+                  'API URLとAPIキーを保存してから利用できます。',
+                  style: TextStyle(fontSize: 12),
+                ),
                 if (_error != null)
                   Padding(
                     padding: const EdgeInsets.only(top: 14),
