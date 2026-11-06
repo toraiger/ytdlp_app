@@ -94,6 +94,12 @@ class PlaybackController extends ChangeNotifier {
       mediaExtension: _currentMedia?.ext,
       mediaProtocol: _currentMedia?.protocol,
       audioCodec: _currentMedia?.acodec,
+      nativeTiming:
+          mode == PlaybackMode.audio &&
+                  currentTrack != null &&
+                  _audio is NativeAudioTimingProvider
+              ? (_audio as NativeAudioTimingProvider).nativeTimingHistory
+              : const [],
       mediaDuration:
           currentTrack == null ? null : audio?.duration ?? video?.duration,
       mediaPosition:
@@ -104,6 +110,28 @@ class PlaybackController extends ChangeNotifier {
   }
 
   bool _isCurrent(int generation) => !_disposed && generation == _generation;
+
+  Future<void> refreshNativeTiming() async {
+    if (_disposed ||
+        mode != PlaybackMode.audio ||
+        currentTrack == null ||
+        _audio is! NativeAudioTimingProvider) {
+      return;
+    }
+    final generation = _generation;
+    final selection = _selection;
+    final track = currentTrack;
+    try {
+      await (_audio as NativeAudioTimingProvider).refreshNativeTiming();
+    } catch (_) {
+      // Optional diagnostics never change playback state or user-facing errors.
+    }
+    if (_isSelectionCurrent(generation, selection) &&
+        identical(track, currentTrack)) {
+      _notify();
+    }
+  }
+
   void _notify() {
     if (!_disposed) notifyListeners();
   }

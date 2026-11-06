@@ -1,8 +1,11 @@
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 import 'package:video_player/video_player.dart';
 
 import '../models/api_models.dart';
+import '../models/native_playback_timing.dart';
 
 enum AudioPhase { idle, loading, ready, completed }
 
@@ -93,8 +96,42 @@ abstract interface class AudioEngine {
   Future<void> dispose();
 }
 
-class JustAudioEngine implements AudioEngine {
+abstract interface class NativeAudioTimingProvider {
+  List<NativePlaybackTiming> get nativeTimingHistory;
+  Future<void> refreshNativeTiming();
+}
+
+class JustAudioEngine implements AudioEngine, NativeAudioTimingProvider {
   final AudioPlayer _player = AudioPlayer(useProxyForRequestHeaders: false);
+  final NativeTimingRecorder _timing = NativeTimingRecorder(_readNativeTiming);
+  int _timingEpoch = 0;
+
+  static Future<Map<Object?, Object?>?> _readNativeTiming() async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return null;
+    return const MethodChannel(
+      'com.ryanheise.just_audio.methods',
+    ).invokeMapMethod<Object?, Object?>('mixGetNativeTiming');
+  }
+
+  @override
+  List<NativePlaybackTiming> get nativeTimingHistory => _timing.history;
+
+  Future<void> _captureTiming(NativeTimingPhase phase, {int? epoch}) {
+    final requestedEpoch = epoch ?? _timingEpoch;
+    if (requestedEpoch != _timingEpoch) return Future.value();
+    final index = _player.playbackEvent.currentIndex;
+    return _timing.capture(
+      phase,
+      isCurrent:
+          () =>
+              requestedEpoch == _timingEpoch &&
+              _player.playbackEvent.currentIndex == index,
+    );
+  }
+
+  @override
+  Future<void> refreshNativeTiming() =>
+      _captureTiming(NativeTimingPhase.inspect);
 
   @override
   AudioSnapshot get snapshot {
@@ -127,23 +164,44 @@ class JustAudioEngine implements AudioEngine {
       _player.errorStream.map((_) => '音声を再生できません。曲を選び直して再生 URL を取得してください。');
   @override
   Future<void> load(QueueEntry entry) async {
+    final epoch = ++_timingEpoch;
+    _timing.invalidate(clear: true);
     await _player.setAudioSources([createAudioSource(entry)]);
+    await _captureTiming(NativeTimingPhase.load, epoch: epoch);
   }
 
   @override
-  Future<void> append(QueueEntry entry) =>
-      _player.addAudioSource(createAudioSource(entry));
+  Future<void> append(QueueEntry entry) async {
+    final epoch = _timingEpoch;
+    await _player.addAudioSource(createAudioSource(entry));
+    await _captureTiming(NativeTimingPhase.append, epoch: epoch);
+  }
+
   @override
   Future<void> play() => _player.play();
   @override
   Future<void> pause() => _player.pause();
   @override
-  Future<void> stop() => _player.stop();
+  Future<void> stop() {
+    _timingEpoch++;
+    _timing.invalidate(clear: true);
+    return _player.stop();
+  }
+
   @override
-  Future<void> seek(Duration position, {int? index}) =>
-      _player.seek(position, index: index);
+  Future<void> seek(Duration position, {int? index}) async {
+    final epoch = ++_timingEpoch;
+    _timing.invalidate();
+    await _player.seek(position, index: index);
+    await _captureTiming(NativeTimingPhase.seek, epoch: epoch);
+  }
+
   @override
-  Future<void> dispose() => _player.dispose();
+  Future<void> dispose() {
+    _timingEpoch++;
+    _timing.invalidate(clear: true);
+    return _player.dispose();
+  }
 }
 
 class VideoStatus {

@@ -1,4 +1,5 @@
 import 'api_models.dart';
+import 'native_playback_timing.dart';
 
 /// Playback timing and format metadata; no URLs, video IDs or credentials.
 class PlaybackDiagnostics {
@@ -15,6 +16,7 @@ class PlaybackDiagnostics {
     this.mediaExtension,
     this.mediaProtocol,
     this.audioCodec,
+    this.nativeTiming = const [],
   });
 
   final PlaybackMode mode;
@@ -29,4 +31,5 @@ class PlaybackDiagnostics {
   final String? mediaExtension;
   final String? mediaProtocol;
   final String? audioCodec;
+  final List<NativePlaybackTiming> nativeTiming;
 }

@@ -8,6 +8,9 @@ on:
       - '.flutter-version'
       - 'ios/**'
       - 'lib/**'
+      - 'packages/just_audio/**'
+      - 'test/native/**'
+      - 'scripts/test_native_audio.sh'
       - 'assets/**'
       - 'pubspec.yaml'
       - 'pubspec.lock'
@@ -34,6 +37,8 @@ jobs:
         run: |
           xcodebuild -version
           pod --version
+      - name: Test native audio timing and completion order
+        run: bash scripts/test_native_audio.sh
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.32.5'

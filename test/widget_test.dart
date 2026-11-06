@@ -5,8 +5,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
+import 'package:mix_player_app/models/native_playback_timing.dart';
 import 'package:mix_player_app/player_app.dart';
 import 'package:mix_player_app/services/app_settings.dart';
+import 'package:mix_player_app/services/playback_engines.dart';
 import 'support/fakes.dart';
 
 void main() {
@@ -274,7 +276,7 @@ void main() {
     },
   );
   testWidgets(
-    'Playback report distinguishes list, API and media durations without secrets',
+    'Playback report refreshes native timing and keeps all sources free of secrets',
     (tester) async {
       String? copied;
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
@@ -292,7 +294,7 @@ void main() {
           null,
         );
       });
-      final audio = FakeAudioEngine();
+      final audio = _DiagnosticAudioEngine();
       final settings =
           MemorySettings()
             ..snapshot = const SettingsSnapshot(
@@ -342,10 +344,47 @@ void main() {
       expect(copied, contains('形式: 140 / m4a'));
       expect(copied, contains('配信方式: https'));
       expect(copied, contains('音声コーデック: mp4a.40.2'));
+      expect(audio.refreshCount, 2);
+      expect(copied, contains('[iOS 表示時] 実曲:1 内部:1 キュー:2 ソース:3'));
+      expect(copied, contains('項目の長さ: 03:57.000 / 音源の長さ: 03:57.000'));
+      expect(copied, contains('シーク範囲の開始: 00:00.000 / 長さ: 07:53.000'));
+      expect(copied, contains('長さの取得元: 曲データ'));
+      expect(copied, isNot(contains('do-not-copy-video-id')));
       expect(copied, isNot(contains('do-not-copy-api-key')));
       expect(copied, isNot(contains('https://')));
       expect(copied, isNot(contains('Track a')));
       expect(tester.takeException(), isNull);
     },
   );
+}
+
+class _DiagnosticAudioEngine extends FakeAudioEngine
+    implements NativeAudioTimingProvider {
+  int refreshCount = 0;
+  final recorder = NativeTimingRecorder(
+    () async => {
+      'itemDurationUs': 237000000,
+      'assetDurationUs': 237000000,
+      'seekableStartUs': 0,
+      'seekableDurationUs': 473000000,
+      'positionUs': 4000000,
+      'actualIndex': 0,
+      'storedIndex': 0,
+      'queueLength': 2,
+      'sourceCount': 3,
+      'durationSource': 'item',
+      'url': 'https://must-not-be-copied.test/private',
+      'videoId': 'do-not-copy-video-id',
+      'headers': {'X-API-Key': 'do-not-copy-api-key'},
+    },
+  );
+
+  @override
+  List<NativePlaybackTiming> get nativeTimingHistory => recorder.history;
+
+  @override
+  Future<void> refreshNativeTiming() async {
+    refreshCount++;
+    await recorder.capture(NativeTimingPhase.inspect);
+  }
 }
