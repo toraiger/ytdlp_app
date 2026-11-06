@@ -14,19 +14,20 @@ void main() {
     WidgetTester tester,
     MemorySettings settings, {
     FakeAudioEngine? audio,
+    Map<String, dynamic> Function(String)? streamResponse,
   }) async {
     await tester.pumpWidget(
       PlayerApp(
         settings: settings,
         audioEngine: audio ?? FakeAudioEngine(),
         apiFactory:
-            (_, __) => mockApi(
-              (request) => jsonResponse(
-                request.url.path == '/stream'
-                    ? streamJson(jsonDecode(request.body)['video_id'] as String)
-                    : mixJson(['a', 'b']),
-              ),
-            ),
+            (_, __) => mockApi((request) {
+              if (request.url.path == '/stream') {
+                final id = jsonDecode(request.body)['video_id'] as String;
+                return jsonResponse((streamResponse ?? streamJson)(id));
+              }
+              return jsonResponse(mixJson(['a', 'b']));
+            }),
       ),
     );
     await tester.pumpAndSettle();
@@ -273,7 +274,7 @@ void main() {
     },
   );
   testWidgets(
-    'Playback report distinguishes media and list durations without secrets',
+    'Playback report distinguishes list, API and media durations without secrets',
     (tester) async {
       String? copied;
       tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
@@ -298,7 +299,20 @@ void main() {
               serverUrl: 'https://api.example.test',
               apiKey: 'do-not-copy-api-key',
             );
-      await launch(tester, settings, audio: audio);
+      await launch(
+        tester,
+        settings,
+        audio: audio,
+        streamResponse: (id) {
+          final result = streamJson(id)..['duration'] = 237.125;
+          (result['audio'] as Map<String, dynamic>).addAll(<String, Object>{
+            'format_id': '140',
+            'protocol': 'https',
+            'acodec': 'mp4a.40.2',
+          });
+          return result;
+        },
+      );
       await tester.ensureVisible(find.text('Mix を20曲取得'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Mix を20曲取得'));
@@ -321,9 +335,13 @@ void main() {
       await tester.tap(find.text('再生情報をコピー'));
       await tester.pumpAndSettle();
       expect(copied, contains('一覧の長さ: 02:00'));
+      expect(copied, contains('再生URL取得時の長さ: 03:57'));
       expect(copied, contains('メディアの長さ: 07:07'));
       expect(copied, contains('メディアの経過時間: 05:20'));
       expect(copied, contains('プレーヤー内の曲番号: 1'));
+      expect(copied, contains('形式: 140 / m4a'));
+      expect(copied, contains('配信方式: https'));
+      expect(copied, contains('音声コーデック: mp4a.40.2'));
       expect(copied, isNot(contains('do-not-copy-api-key')));
       expect(copied, isNot(contains('https://')));
       expect(copied, isNot(contains('Track a')));

@@ -1145,8 +1145,12 @@ class _PlaybackDetails extends StatelessWidget {
         'プレーヤー内の曲番号: ${info.playerIndex == null ? '—' : info.playerIndex! + 1}',
         'キュー内の曲数: ${info.queueLength}',
         '一覧の長さ: ${formatTime(info.listDuration)}',
+        '再生URL取得時の長さ: ${formatTime(info.apiDuration)}',
         'メディアの長さ: ${formatTime(info.mediaDuration)}',
         'メディアの経過時間: ${formatTime(info.mediaPosition)}',
+        '形式: ${info.formatId ?? '—'} / ${info.mediaExtension ?? '—'}',
+        '配信方式: ${info.mediaProtocol ?? '—'}',
+        '音声コーデック: ${info.audioCodec ?? '—'}',
       ].join('\n');
       return ExpansionTile(
         tilePadding: EdgeInsets.zero,

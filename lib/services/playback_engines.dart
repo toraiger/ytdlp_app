@@ -30,11 +30,51 @@ class QueueEntry {
     required this.uri,
     this.mixIndex,
     this.httpHeaders = const {},
+    this.format,
+    this.streamDuration,
   });
   final MixTrack track;
   final Uri uri;
   final int? mixIndex;
   final Map<String, String> httpHeaders;
+  final StreamFormat? format;
+  final Duration? streamDuration;
+}
+
+/// Preserve manifest transports even when the signed URL has no file extension.
+AudioSource createAudioSource(QueueEntry entry) {
+  final tag = MediaItem(
+    id: entry.track.videoId,
+    title: entry.track.title,
+    artist: entry.track.channel,
+    artUri: entry.track.thumbnail,
+    duration:
+        entry.streamDuration != null && entry.streamDuration! > Duration.zero
+            ? entry.streamDuration
+            : entry.track.duration,
+  );
+  final protocol = entry.format?.protocol;
+  if (protocol == 'm3u8' || protocol == 'm3u8_native') {
+    return HlsAudioSource(entry.uri, headers: entry.httpHeaders, tag: tag);
+  }
+  final source = AudioSource.uri(
+    entry.uri,
+    headers: entry.httpHeaders,
+    tag: tag,
+  );
+  if (source is! ProgressiveAudioSource) return source;
+  // AVPlayer's default timing is approximate. Request precise timing for VOD
+  // without changing the media's duration or clipping it to list metadata.
+  return ProgressiveAudioSource(
+    entry.uri,
+    headers: entry.httpHeaders,
+    tag: tag,
+    options: const ProgressiveAudioSourceOptions(
+      darwinAssetOptions: DarwinAssetOptions(
+        preferPreciseDurationAndTiming: true,
+      ),
+    ),
+  );
 }
 
 abstract interface class AudioEngine {
@@ -66,18 +106,6 @@ class JustAudioEngine implements AudioEngine {
     );
   }
 
-  AudioSource _source(QueueEntry entry) => AudioSource.uri(
-    entry.uri,
-    headers: entry.httpHeaders,
-    tag: MediaItem(
-      id: entry.track.videoId,
-      title: entry.track.title,
-      artist: entry.track.channel,
-      artUri: entry.track.thumbnail,
-      duration: entry.track.duration,
-    ),
-  );
-
   @override
   Stream<AudioStatus> get states => _player.playerStateStream.map(
     (state) => AudioStatus(state.playing, switch (state.processingState) {
@@ -99,12 +127,12 @@ class JustAudioEngine implements AudioEngine {
       _player.errorStream.map((_) => '音声を再生できません。曲を選び直して再生 URL を取得してください。');
   @override
   Future<void> load(QueueEntry entry) async {
-    await _player.setAudioSources([_source(entry)]);
+    await _player.setAudioSources([createAudioSource(entry)]);
   }
 
   @override
   Future<void> append(QueueEntry entry) =>
-      _player.addAudioSource(_source(entry));
+      _player.addAudioSource(createAudioSource(entry));
   @override
   Future<void> play() => _player.play();
   @override

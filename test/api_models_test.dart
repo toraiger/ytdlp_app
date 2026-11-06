@@ -30,6 +30,18 @@ void main() {
     expect(model.audio?.httpHeaders['User-Agent'], 'audio-a');
     expect(model.videoAudio?.httpHeaders['User-Agent'], 'video-a');
   });
+  test('Stream duration preserves fractional seconds and legacy responses', () {
+    final model = StreamResponse.fromJson({
+      ...streamJson('a'),
+      'duration': 237.125,
+    });
+    expect(model.duration, const Duration(milliseconds: 237125));
+    expect(StreamResponse.fromJson(streamJson('a')).duration, isNull);
+    expect(
+      StreamResponse.fromJson({...streamJson('a'), 'duration': -1}).duration,
+      isNull,
+    );
+  });
   test('Media headers are optional and cannot carry the API key', () {
     final format = StreamFormat.fromJson({
       'url': 'https://media.test/a.m4a',

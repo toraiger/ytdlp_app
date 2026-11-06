@@ -182,7 +182,11 @@ class ApiClient {
           {'video_id': videoId, 'include_formats': false},
         );
         try {
-          return StreamResponse.fromJson(json);
+          final response = StreamResponse.fromJson(json);
+          if (response.videoId != videoId) {
+            throw const ApiFailure('再生 URL が要求した曲と一致しません。Mix を取得し直してください。');
+          }
+          return response;
         } on FormatException {
           throw const ApiFailure('再生 URL の応答形式が正しくありません。');
         } on TypeError {
