@@ -20,7 +20,7 @@ xcrun clang -fobjc-arc -Wall -Wextra -Werror \
 "$mix_native_build/audio_timeline_test"
 
 cp "$mix_native_root/test/fixtures/dash-tone.m4a" "$mix_native_build/dash-tone.m4a"
-dart --suppress-analytics "$mix_native_root/scripts/normalize_m4a_fixture.dart" \
+dart --suppress-analytics run "$mix_native_root/scripts/normalize_m4a_fixture.dart" \
   "$mix_native_build/dash-tone.m4a" "$mix_native_build/normalized.m4a"
 python3 "$mix_native_root/test/native/media_server.py" \
   "$mix_native_build" "$mix_native_build/port" &
