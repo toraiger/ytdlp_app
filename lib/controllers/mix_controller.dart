@@ -3,11 +3,22 @@ import 'package:flutter/foundation.dart';
 import '../models/api_models.dart';
 import '../services/api_client.dart';
 
+class RemovedMixTrack {
+  const RemovedMixTrack(this.track, this.index, this.revision);
+  final MixTrack track;
+  final int index;
+  final int revision;
+}
+
 class MixController extends ChangeNotifier {
   ApiClient? _api;
   MixResponse? _session;
   List<MixTrack> _items = [];
   int _generation = 0;
+  int editRevision = 0;
+  int _extensionRevision = 0;
+  final _removedIds = <String>{};
+  RemovedMixTrack? _lastRemoved;
   bool _disposed = false;
   bool prepareFirstTrackOnLoad = true;
   bool isLoading = false;
@@ -32,6 +43,8 @@ class MixController extends ChangeNotifier {
     _api = client;
     _session = null;
     _items = [];
+    _removedIds.clear();
+    _lastRemoved = null;
     isLoading = false;
     isExtending = false;
     error = null;
@@ -81,6 +94,8 @@ class MixController extends ChangeNotifier {
       }
       _session = result;
       _items = mergeTracks([], result.items);
+      _removedIds.clear();
+      _lastRemoved = null;
       return true;
     } catch (e) {
       if (_isCurrent(generation)) error = describeFailure(e);
@@ -97,27 +112,80 @@ class MixController extends ChangeNotifier {
     if (_session == null || isLoading || isExtending) return 0;
     final generation = _generation;
     final session = _session!;
+    final extension = ++_extensionRevision;
     isExtending = true;
     error = null;
     notifyListeners();
     try {
       final result = await api.extendMix(session.sessionId);
-      if (!_isCurrent(generation)) return 0;
-      final merged = mergeTracks(_items, result.items);
+      if (!_isCurrent(generation) || extension != _extensionRevision) return 0;
+      final merged = mergeTracks(
+        _items,
+        result.items.where((track) => !_removedIds.contains(track.videoId)),
+      );
       final added = merged.length - _items.length;
       _items = merged;
       _session = result;
       lastExtensionAdded = added;
       return added;
     } catch (e) {
-      if (_isCurrent(generation)) error = describeFailure(e);
+      if (_isCurrent(generation) && extension == _extensionRevision) {
+        error = describeFailure(e);
+      }
       return 0;
     } finally {
-      if (_isCurrent(generation)) {
+      if (_isCurrent(generation) && extension == _extensionRevision) {
         isExtending = false;
         notifyListeners();
       }
     }
+  }
+
+  bool moveTrack(String videoId, int toIndex) {
+    if (isLoading) return false;
+    final from = _items.indexWhere((track) => track.videoId == videoId);
+    if (from < 0 ||
+        toIndex < 0 ||
+        toIndex >= _items.length ||
+        from == toIndex) {
+      return false;
+    }
+    final track = _items.removeAt(from);
+    _items.insert(toIndex, track);
+    editRevision++;
+    notifyListeners();
+    return true;
+  }
+
+  RemovedMixTrack? removeTrack(String videoId) {
+    if (isLoading) return null;
+    final index = _items.indexWhere((track) => track.videoId == videoId);
+    if (index < 0) return null;
+    final removed = RemovedMixTrack(_items.removeAt(index), index, revision);
+    _removedIds.add(videoId);
+    _lastRemoved = removed;
+    if (_items.isEmpty) {
+      // Do not repopulate an emptied list from an already pending extension.
+      _extensionRevision++;
+      isExtending = false;
+    }
+    editRevision++;
+    notifyListeners();
+    return removed;
+  }
+
+  bool restoreTrack(RemovedMixTrack removed) {
+    if (isLoading ||
+        !identical(removed, _lastRemoved) ||
+        removed.revision != revision) {
+      return false;
+    }
+    _lastRemoved = null;
+    _removedIds.remove(removed.track.videoId);
+    _items.insert(removed.index.clamp(0, _items.length), removed.track);
+    editRevision++;
+    notifyListeners();
+    return true;
   }
 
   bool _isCurrent(int generation) => !_disposed && generation == _generation;

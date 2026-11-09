@@ -114,6 +114,13 @@ class _PlayerScreenState extends State<_PlayerScreen>
   late final YoutubePlaybackController _youtube;
   SettingsSnapshot _settings = const SettingsSnapshot();
   bool _initializing = true;
+  bool _editingList = false;
+  int? _editingRevision;
+  bool get _listEditing => _editingList && _editingRevision == _mix.revision;
+  void _toggleListEditing() => setState(() {
+    _editingList = !_listEditing;
+    _editingRevision = _mix.revision;
+  });
   String? _settingsError;
 
   @override
@@ -204,6 +211,7 @@ class _PlayerScreenState extends State<_PlayerScreen>
   }
 
   Future<void> _showYoutube() async {
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
     await Navigator.of(context).push<void>(
       MaterialPageRoute(
         builder:
@@ -218,6 +226,8 @@ class _PlayerScreenState extends State<_PlayerScreen>
   }
 
   Future<void> _load() async {
+    ScaffoldMessenger.of(context).hideCurrentSnackBar();
+    setState(() => _editingList = false);
     _youtube.reset();
     FocusManager.instance.primaryFocus?.unfocus();
     await _playback.stop();
@@ -231,6 +241,23 @@ class _PlayerScreenState extends State<_PlayerScreen>
         if (mounted) setState(() => _settingsError = 'Mix URL を保存できませんでした。');
       }
     }
+  }
+
+  void _removeTrack(String videoId) {
+    final removed = _mix.removeTrack(videoId);
+    if (removed == null) return;
+    if (_mix.items.isEmpty) setState(() => _editingList = false);
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(
+        SnackBar(
+          content: const Text('曲を一覧から削除しました。'),
+          action: SnackBarAction(
+            label: '元に戻す',
+            onPressed: () => _mix.restoreTrack(removed),
+          ),
+        ),
+      );
   }
 
   Future<void> _direct() async {
@@ -422,6 +449,16 @@ class _PlayerScreenState extends State<_PlayerScreen>
                                 fontSize: 12,
                               ),
                             ),
+                            TextButton(
+                              onPressed:
+                                  tracks.isEmpty ||
+                                          _mix.isLoading ||
+                                          _playback.isBusy ||
+                                          _playback.isUpdatingQueue
+                                      ? null
+                                      : _toggleListEditing,
+                              child: Text(_listEditing ? '完了' : '編集'),
+                            ),
                           ],
                         ),
                         const SizedBox(height: 12),
@@ -437,18 +474,38 @@ class _PlayerScreenState extends State<_PlayerScreen>
                   ),
                   SliverPadding(
                     padding: const EdgeInsets.symmetric(horizontal: 20),
-                    sliver: SliverList.builder(
+                    sliver: SliverReorderableList(
+                      onReorder: (from, to) {
+                        if (!_listEditing ||
+                            _mix.isLoading ||
+                            _playback.isBusy ||
+                            _playback.isUpdatingQueue) {
+                          return;
+                        }
+                        _mix.moveTrack(
+                          tracks[from].videoId,
+                          to > from ? to - 1 : to,
+                        );
+                      },
                       itemCount: tracks.length,
                       itemBuilder:
                           (_, index) => _TrackTile(
+                            key: ValueKey(tracks[index].videoId),
+                            editIndex: _listEditing ? index : null,
+                            canEdit:
+                                !_mix.isLoading &&
+                                !_playback.isBusy &&
+                                !_playback.isUpdatingQueue,
+                            onDelete: () => _removeTrack(tracks[index].videoId),
                             track: tracks[index],
                             number: index + 1,
                             selected:
                                 !_playback.isDirect &&
-                                _playback.currentIndex == index,
+                                _playback.currentTrack?.videoId ==
+                                    tracks[index].videoId,
                             playing: _playback.isPlaying,
                             onTap:
-                                _mix.isLoading
+                                _mix.isLoading || _listEditing
                                     ? null
                                     : () => _playback.playTrack(index),
                           ),
@@ -702,6 +759,10 @@ class _Artwork extends StatelessWidget {
 
 class _TrackTile extends StatelessWidget {
   const _TrackTile({
+    super.key,
+    this.editIndex,
+    this.canEdit = true,
+    this.onDelete,
     required this.track,
     required this.number,
     required this.selected,
@@ -709,6 +770,9 @@ class _TrackTile extends StatelessWidget {
     this.onTap,
   });
   final MixTrack track;
+  final int? editIndex;
+  final bool canEdit;
+  final VoidCallback? onDelete;
   final int number;
   final bool selected;
   final bool playing;
@@ -726,21 +790,22 @@ class _TrackTile extends StatelessWidget {
           padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 10),
           child: Row(
             children: [
-              SizedBox(
-                width: 26,
-                child:
-                    selected && playing
-                        ? const Icon(
-                          Icons.graphic_eq_rounded,
-                          size: 18,
-                          color: _accent,
-                        )
-                        : Text(
-                          '$number',
-                          style: const TextStyle(color: _muted, fontSize: 11),
-                        ),
-              ),
-              _Artwork(uri: track.thumbnail),
+              if (editIndex == null)
+                SizedBox(
+                  width: 26,
+                  child:
+                      selected && playing
+                          ? const Icon(
+                            Icons.graphic_eq_rounded,
+                            size: 18,
+                            color: _accent,
+                          )
+                          : Text(
+                            '$number',
+                            style: const TextStyle(color: _muted, fontSize: 11),
+                          ),
+                ),
+              _Artwork(uri: track.thumbnail, size: editIndex == null ? 52 : 40),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
@@ -767,10 +832,29 @@ class _TrackTile extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              Text(
-                formatTime(track.duration),
-                style: const TextStyle(color: _muted, fontSize: 11),
-              ),
+              if (editIndex == null)
+                Text(
+                  formatTime(track.duration),
+                  style: const TextStyle(color: _muted, fontSize: 11),
+                )
+              else ...[
+                IconButton(
+                  tooltip: '${track.title}を削除',
+                  onPressed: canEdit ? onDelete : null,
+                  icon: const Icon(Icons.remove_circle_outline, size: 22),
+                ),
+                ReorderableDragStartListener(
+                  index: editIndex!,
+                  enabled: canEdit,
+                  child: Tooltip(
+                    message: '${track.title}を移動',
+                    child: const Padding(
+                      padding: EdgeInsets.all(10),
+                      child: Icon(Icons.drag_handle, size: 24),
+                    ),
+                  ),
+                ),
+              ],
             ],
           ),
         ),

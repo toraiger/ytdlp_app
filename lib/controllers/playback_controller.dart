@@ -24,6 +24,7 @@ class PlaybackController extends ChangeNotifier {
   }) : _audio = audio,
        _videoFactory = videoFactory ?? NativeVideoEngine.new {
     _mixRevision = mix.revision;
+    _mixEditRevision = mix.editRevision;
     _subscriptions.addAll([
       _audio.states.listen(_onAudioState),
       _audio.positions.listen((_) => _syncAudioProgress()),
@@ -43,6 +44,10 @@ class PlaybackController extends ChangeNotifier {
   // _videoをnullにした後も解放が続くため、次の選択もその完了を共有して待つ。
   Future<void> _videoTail = Future.value();
   late int _mixRevision;
+  late int _mixEditRevision;
+  int _editRequest = 0;
+  bool isUpdatingQueue = false;
+  bool _completedDuringEdit = false;
   Stopwatch? _startupProgress;
   VideoEngine? _video;
   StreamFormat? _currentMedia;
@@ -50,7 +55,7 @@ class PlaybackController extends ChangeNotifier {
   int _generation = 0;
   int _selection = 0;
   int _seekRevision = 0;
-  int? _fillingGeneration;
+  (int, int)? _fillingGeneration;
   int? _completedGeneration;
   int? _attemptedExtendLength;
   int _queueIndex = 0;
@@ -65,6 +70,7 @@ class PlaybackController extends ChangeNotifier {
   bool _canRefreshCurrent = false;
   bool _playbackFailed = false;
   bool _isYoutubeSingle = false;
+  bool _autoPlayRequested = false;
   String? _pendingAudioError;
 
   PlaybackMode mode = PlaybackMode.audio;
@@ -172,7 +178,10 @@ class PlaybackController extends ChangeNotifier {
   Future<void> playTrack(int index) async {
     if (index < 0 || index >= mix.items.length) return;
     final track = mix.items[index];
-    if (mode == PlaybackMode.audio && !isDirect && !_playbackFailed) {
+    if (mode == PlaybackMode.audio &&
+        !isDirect &&
+        !_playbackFailed &&
+        !isUpdatingQueue) {
       final preparation =
           index == 0 && _firstPreparationGeneration == _generation
               ? _firstPreparation
@@ -188,6 +197,7 @@ class PlaybackController extends ChangeNotifier {
   Future<void> _startTrack(
     MixTrack track,
     int? index, {
+    bool autoPlay = true,
     bool refresh = false,
   }) async {
     final requestedMode = mode;
@@ -196,6 +206,7 @@ class PlaybackController extends ChangeNotifier {
     await _start(
       track,
       mixIndex: index,
+      autoPlay: autoPlay,
       refresh: refresh,
       cached: api.cachedMedia(track.videoId, requestedMode) != null,
       usesApi: true,
@@ -267,9 +278,12 @@ class PlaybackController extends ChangeNotifier {
     required Future<_ResolvedMedia> Function(bool refresh) resolve,
     bool refresh = false,
     bool cached = false,
+    bool autoPlay = true,
     bool usesApi = false,
     MixTrack Function()? resolvedTrack,
   }) async {
+    _editRequest++;
+    isUpdatingQueue = false;
     final generation = ++_generation;
     final selection = ++_selection;
     final requestedMode = mode;
@@ -286,6 +300,7 @@ class PlaybackController extends ChangeNotifier {
     _streamDuration = null;
     currentTrack = track;
     currentIndex = mixIndex;
+    _autoPlayRequested = autoPlay;
     isDirect = mixIndex == null;
     _isYoutubeSingle = usesApi && isDirect;
     isBusy = true;
@@ -338,7 +353,7 @@ class PlaybackController extends ChangeNotifier {
           () => _mutateAudio(generation, () => _audio.load(entry)),
         );
         if (!_isCurrent(generation)) return;
-        _playAudio(generation);
+        if (autoPlay) _playAudio(generation);
         if (!isDirect) unawaited(_fillQueue(generation));
       } else {
         final video = _videoFactory(uri, media.httpHeaders);
@@ -347,7 +362,7 @@ class PlaybackController extends ChangeNotifier {
         if (!_isCurrent(generation) || _video != video) return;
         video.addListener(_onVideoChanged);
         _onVideoChanged();
-        if (_videoForeground) await video.play();
+        if (_videoForeground && autoPlay) await video.play();
       }
     } catch (e) {
       if (_isCurrent(generation)) {
@@ -357,6 +372,7 @@ class PlaybackController extends ChangeNotifier {
             mixIndex: mixIndex,
             resolve: resolve,
             refresh: true,
+            autoPlay: autoPlay,
             usesApi: usesApi,
             resolvedTrack: resolvedTrack,
           );
@@ -395,6 +411,7 @@ class PlaybackController extends ChangeNotifier {
     Future<bool>? preparation,
   ) async {
     final generation = _generation;
+    _autoPlayRequested = true;
     final selection = ++_selection;
     _startupProgress = Stopwatch()..start();
     _currentMedia = null;
@@ -484,19 +501,28 @@ class PlaybackController extends ChangeNotifier {
   }
 
   Future<void> _fillQueue(int generation) async {
+    final order = mix.editRevision;
+    final filling = (generation, order);
     if (!_isCurrent(generation) ||
         isDirect ||
         mode != PlaybackMode.audio ||
         _queue.isEmpty ||
-        _fillingGeneration == generation) {
+        isUpdatingQueue ||
+        _fillingGeneration == filling) {
       return;
     }
-    _fillingGeneration = generation;
+    _fillingGeneration = filling;
     try {
-      while (_isCurrent(generation) && _queue.length - _queueIndex < 3) {
+      while (_isCurrent(generation) &&
+          order == mix.editRevision &&
+          !isUpdatingQueue &&
+          _queue.length - _queueIndex < 3) {
         if (_nextCandidate >= mix.items.length) {
           await _extendOnce(generation);
-          if (!_isCurrent(generation) || _nextCandidate >= mix.items.length) {
+          if (!_isCurrent(generation) ||
+              order != mix.editRevision ||
+              isUpdatingQueue ||
+              _nextCandidate >= mix.items.length) {
             break;
           }
         }
@@ -504,7 +530,11 @@ class PlaybackController extends ChangeNotifier {
         final track = mix.items[index];
         try {
           final response = await mix.api.resolveStream(track.videoId);
-          if (!_isCurrent(generation)) return;
+          if (!_isCurrent(generation) ||
+              order != mix.editRevision ||
+              isUpdatingQueue) {
+            return;
+          }
           final media = response.audio;
           final uri = media?.url;
           if (media == null || uri == null) {
@@ -519,6 +549,7 @@ class PlaybackController extends ChangeNotifier {
             streamDuration: response.duration,
           );
           await _mutateAudio(generation, () async {
+            if (order != mix.editRevision || isUpdatingQueue) return;
             await _audio.append(entry);
             if (_isCurrent(generation)) {
               _queue.add(entry);
@@ -529,13 +560,13 @@ class PlaybackController extends ChangeNotifier {
           });
           _notify();
         } catch (_) {
-          if (!_isCurrent(generation)) return;
+          if (!_isCurrent(generation) || order != mix.editRevision) return;
           error = '先読みできなかった曲をスキップしました。現在の曲の再生は続きます。';
           _notify();
         }
       }
     } finally {
-      if (_fillingGeneration == generation) _fillingGeneration = null;
+      if (_fillingGeneration == filling) _fillingGeneration = null;
     }
   }
 
@@ -560,6 +591,11 @@ class PlaybackController extends ChangeNotifier {
               _queue.isNotEmpty)) {
         unawaited(stop());
       }
+    }
+    if (_mixEditRevision != mix.editRevision) {
+      _mixEditRevision = mix.editRevision;
+      _applyListEdit();
+      return;
     }
     if (mix.isLoading || mix.items.isEmpty) {
       _preparedSession = null;
@@ -588,6 +624,152 @@ class PlaybackController extends ChangeNotifier {
     }
     if (currentTrack != null && !isDirect && !isBusy) {
       unawaited(_fillQueue(_generation));
+    }
+  }
+
+  void _applyListEdit() {
+    if (isDirect) return;
+    final track = currentTrack;
+    if (track == null) {
+      final revision = mix.editRevision;
+      final stopped = stop();
+      unawaited(
+        stopped.then((_) {
+          if (!_disposed &&
+              revision == mix.editRevision &&
+              currentTrack == null) {
+            _preparedSession = null;
+            _onMixChanged();
+          }
+        }),
+      );
+      return;
+    }
+    final oldIndex = currentIndex ?? 0;
+    final index = mix.items.indexWhere((item) => item.videoId == track.videoId);
+    final resume = isBusy ? _autoPlayRequested : isPlaying;
+    if (index < 0) {
+      if (oldIndex < mix.items.length) {
+        unawaited(_startTrack(mix.items[oldIndex], oldIndex, autoPlay: resume));
+      } else {
+        unawaited(stop());
+      }
+      return;
+    }
+    currentIndex = index;
+    _selection++; // discard a seek preview that referred to the old queue
+    if (isBusy) {
+      unawaited(_startTrack(track, index, autoPlay: resume));
+      return;
+    }
+    if (mode != PlaybackMode.audio) {
+      _notify();
+      return;
+    }
+    final request = ++_editRequest;
+    final generation = _generation;
+    if (!isUpdatingQueue) _completedDuringEdit = false;
+    isUpdatingQueue = true;
+    _notify();
+    unawaited(_updateEditedQueue(generation, request, track.videoId));
+  }
+
+  Future<void> _updateEditedQueue(
+    int generation,
+    int request,
+    String anchor,
+  ) async {
+    bool valid() => _isCurrent(generation) && request == _editRequest;
+    try {
+      await _mutateAudio(generation, () async {
+        if (!valid()) return;
+        final start = mix.items.indexWhere((track) => track.videoId == anchor);
+        if (start < 0) return;
+        // Keep loaded history in the edited order for previous/lock-screen
+        // navigation. Move other sources around the active source, never reload
+        // or explicitly move that active source.
+        final desired =
+            mix.items
+                .take(start)
+                .where(
+                  (track) => _queue.any(
+                    (entry) => entry.track.videoId == track.videoId,
+                  ),
+                )
+                .map((track) => track.videoId)
+                .toList();
+        final prefixLength = desired.length;
+        // Retain only a contiguous ready window. A missing next source must
+        // never let a later cached source jump ahead while its URL resolves.
+        for (final track in mix.items.skip(start).take(3)) {
+          if (!_queue.any((entry) => entry.track.videoId == track.videoId)) {
+            break;
+          }
+          desired.add(track.videoId);
+        }
+        if (desired.length == prefixLength) {
+          throw StateError('Missing active source');
+        }
+        for (var i = _queue.length - 1; i >= 0; i--) {
+          if (!valid()) return;
+          if (!desired.contains(_queue[i].track.videoId)) {
+            await _audio.removeAt(i);
+            if (!_isCurrent(generation)) return;
+            _queue.removeAt(i);
+          }
+        }
+        for (var i = 0; i < desired.length; i++) {
+          if (!valid()) return;
+          if (desired[i] == anchor) continue;
+          final from = _queue.indexWhere(
+            (entry) => entry.track.videoId == desired[i],
+          );
+          if (from != i) {
+            await _audio.move(from, i);
+            if (!_isCurrent(generation)) return;
+            _queue.insert(i, _queue.removeAt(from));
+          }
+        }
+        for (var i = 0; i < _queue.length; i++) {
+          final entry = _queue[i];
+          _queue[i] = QueueEntry(
+            track: entry.track,
+            uri: entry.uri,
+            httpHeaders: entry.httpHeaders,
+            format: entry.format,
+            streamDuration: entry.streamDuration,
+            mixIndex: mix.items.indexWhere(
+              (track) => track.videoId == entry.track.videoId,
+            ),
+          );
+        }
+        _queueIndex = prefixLength;
+        _nextCandidate = start + _queue.length - prefixLength;
+        _attemptedExtendLength = null;
+        final actual = _audio.snapshot.index;
+        if (actual != null &&
+            actual < _queue.length &&
+            _queue[actual].track.videoId != anchor) {
+          _completedDuringEdit = true;
+        }
+      });
+    } catch (_) {
+      if (valid()) {
+        await stop();
+        error = '再生キューを更新できませんでした。曲を選び直してください。';
+        _notify();
+      }
+    } finally {
+      if (valid()) {
+        isUpdatingQueue = false;
+        if (_completedDuringEdit) {
+          unawaited(next());
+        } else {
+          _syncAudioProgress();
+          unawaited(_fillQueue(generation));
+        }
+        _notify();
+      }
     }
   }
 
@@ -646,7 +828,12 @@ class PlaybackController extends ChangeNotifier {
   }
 
   void _syncAudioProgress() {
-    if (mode != PlaybackMode.audio || isBusy || currentTrack == null) return;
+    if (mode != PlaybackMode.audio ||
+        isBusy ||
+        isUpdatingQueue ||
+        currentTrack == null) {
+      return;
+    }
     final snapshot = _audio.snapshot;
     final index = snapshot.index;
     if (index == null || index < 0 || index >= _queue.length) {
@@ -672,6 +859,10 @@ class PlaybackController extends ChangeNotifier {
 
   void _onAudioState(AudioStatus state) {
     if (mode != PlaybackMode.audio || currentTrack == null) return;
+    if (isUpdatingQueue) {
+      if (state.phase == AudioPhase.completed) _completedDuringEdit = true;
+      return;
+    }
     isPlaying = state.playing && state.phase != AudioPhase.completed;
     _recordFirstProgress();
     _notify();
@@ -742,7 +933,9 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> next() async {
     if (currentIndex == null || isDirect || isBusy) return;
-    if (mode == PlaybackMode.audio && _queueIndex + 1 < _queue.length) {
+    if (mode == PlaybackMode.audio &&
+        !isUpdatingQueue &&
+        _queueIndex + 1 < _queue.length) {
       await playTrack(_queue[_queueIndex + 1].mixIndex!);
       return;
     }
@@ -776,7 +969,6 @@ class PlaybackController extends ChangeNotifier {
     final request = ++_seekRevision;
     final track = currentTrack;
     final requestedMode = mode;
-    final index = _queueIndex;
     final video = _video;
     bool isCurrent() =>
         _isSelectionCurrent(generation, selection) &&
@@ -793,7 +985,11 @@ class PlaybackController extends ChangeNotifier {
     try {
       if (requestedMode == PlaybackMode.audio) {
         await _mutateAudio(generation, () async {
-          if (isCurrent() && _audio.snapshot.index == index) {
+          final index = _queueIndex;
+          if (isCurrent() &&
+              _audio.snapshot.index == index &&
+              index < _queue.length &&
+              _queue[index].track.videoId == track?.videoId) {
             await _audio.seek(safe, index: index);
           }
         });
@@ -852,6 +1048,8 @@ class PlaybackController extends ChangeNotifier {
   }
 
   Future<void> stop() async {
+    _editRequest++;
+    isUpdatingQueue = false;
     final generation = ++_generation;
     _startupProgress = null;
     _selection++;
@@ -866,6 +1064,7 @@ class PlaybackController extends ChangeNotifier {
     currentIndex = null;
     isDirect = false;
     _isYoutubeSingle = false;
+    _autoPlayRequested = false;
     isPlaying = false;
     isBusy = false;
     isResolvingUrl = false;

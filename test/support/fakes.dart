@@ -82,6 +82,7 @@ class FakeAudioEngine implements AudioEngine {
   Duration? lastSeek;
   bool playing = false;
   FutureOr<void> Function(QueueEntry entry)? onAppend;
+  FutureOr<void> Function(int index)? onRemove;
   // 終了処理の遅延・失敗を再現し、API取得との並行性を検証するためのフック。
   FutureOr<void> Function()? onStop;
   FutureOr<void> Function(QueueEntry entry)? onLoad;
@@ -122,6 +123,23 @@ class FakeAudioEngine implements AudioEngine {
     entries.add(entry);
     final callback = onAppend;
     if (callback != null) await callback(entry);
+  }
+
+  @override
+  Future<void> removeAt(int index) async {
+    entries.removeAt(index);
+    final callback = onRemove;
+    if (callback != null) await callback(index);
+    if (_index != null && index < _index!) _index = _index! - 1;
+    indexEvents.add(_index);
+  }
+
+  @override
+  Future<void> move(int from, int to) async {
+    final id = _index == null ? null : entries[_index!].track.videoId;
+    entries.insert(to, entries.removeAt(from));
+    if (id != null) _index = entries.indexWhere((e) => e.track.videoId == id);
+    indexEvents.add(_index);
   }
 
   @override

@@ -47,6 +47,13 @@ with sync_playwright() as p:
         args=["--no-sandbox","--autoplay-policy=no-user-gesture-required"])
     try:
         page=browser.new_page(viewport={"width":390,"height":844},device_scale_factor=1)
+        page.add_init_script("""(() => {
+          window.mixAuditMedia = new Set();
+          const play = HTMLMediaElement.prototype.play;
+          HTMLMediaElement.prototype.play = function(...args) {
+            window.mixAuditMedia.add(this); return play.apply(this, args);
+          };
+        })();""")
         errors=[]
         page.on("pageerror",lambda error:errors.append(str(error)))
         page.route("https://mix-api.example.test/**",api_route)
@@ -72,7 +79,7 @@ with sync_playwright() as p:
         page.get_by_role("button",name="キャンセル",exact=True).click()
         expect(page.get_by_role("button",name="Mix を20曲取得",exact=True)).to_be_enabled()
         page.get_by_role("button",name="Mix を20曲取得",exact=True).click()
-        expect(page.get_by_text("Evening Mix · テスト",exact=False)).to_be_visible()
+        expect(page.get_by_role("group",name=re.compile("Evening Mix · テスト"))).to_be_visible()
         print("Mix fetched and settings saved.")
         print("Radios:",page.get_by_role("radio").count())
         print("Clickable labels:",page.locator("[role=radio]").evaluate_all("(els)=>els.map(e=>e.getAttribute('aria-label'))"))
@@ -117,5 +124,46 @@ with sync_playwright() as p:
         expect(page.locator("video")).to_have_count(0)
         assert errors==[],errors
         print("PASS: settings, /mix, audio decode/transport, video decode/stop; no page errors.")
+        # Reproduce list edits against actual decoded audio, not a fake engine.
+        page.get_by_role("radio",name="音声のみ",exact=True).click()
+        page.get_by_role("button",name="Mix を20曲取得",exact=True).click()
+        page.get_by_role("button",name="1 夜の余白 Mix Player テスト音源 00:12",exact=True).click()
+        page.wait_for_function("[...window.mixAuditMedia].some(e=>!e.paused && e.currentTime>0.2)")
+        def current_time():
+            return page.evaluate("Math.max(0,...[...window.mixAuditMedia].filter(e=>!e.paused).map(e=>e.currentTime))")
+        before=current_time()
+        page.mouse.move(180,350)
+        page.mouse.wheel(0,-550)
+        page.get_by_role("button",name="編集",exact=True).click()
+        page.mouse.move(180,350)
+        page.mouse.wheel(0,350)
+        page.wait_for_timeout(250)
+        handle=page.get_by_role("button",name="風をあつめてを削除",exact=True)
+        handle.scroll_into_view_if_needed()
+        start=handle.bounding_box()
+        target=page.get_by_role("button",name="街の灯りを削除",exact=True).bounding_box()
+        assert start and target
+        page.mouse.move(start['x']+start['width']+22,start['y']+start['height']/2)
+        page.mouse.down()
+        page.mouse.move(start['x']+start['width']+22,target['y']+target['height']+12,steps=15)
+        page.wait_for_timeout(400)
+        page.mouse.up()
+        page.wait_for_timeout(250)
+        assert current_time()>=before, 'Reordering reset audio position'
+        page.mouse.move(180,350)
+        page.mouse.wheel(0,-400)
+        page.get_by_role("button",name="完了",exact=True).click()
+        page.get_by_role("button",name="次の曲",exact=True).click()
+        expect(page.get_by_text("街の灯り",exact=False)).to_have_count(2)
+        page.mouse.move(180,350)
+        page.mouse.wheel(0,-400)
+        page.get_by_role("button",name="編集",exact=True).click()
+        page.get_by_role("button",name="街の灯りを削除",exact=True).click()
+        expect(page.get_by_text("風をあつめて",exact=False)).to_have_count(2)
+        page.get_by_role("button",name="元に戻す",exact=True).click()
+        expect(page.get_by_text("風をあつめて",exact=False)).to_have_count(2)
+        page.get_by_role("button",name="停止",exact=True).click()
+        assert errors==[],errors
+        print("PASS: actual audio retains position after drag, follows edited order, skips deleted current track and stays on next track after undo.")
     finally:
         browser.close()

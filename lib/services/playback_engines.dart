@@ -96,6 +96,8 @@ abstract interface class AudioEngine {
   Stream<String> get errors;
   Future<void> load(QueueEntry entry);
   Future<void> append(QueueEntry entry);
+  Future<void> removeAt(int index);
+  Future<void> move(int from, int to);
   Future<void> play();
   Future<void> pause();
   Future<void> stop();
@@ -211,6 +213,35 @@ class JustAudioEngine implements AudioEngine, NativeAudioTimingProvider {
     } on Object {
       _sources.remove(source);
       _closeSources([source]);
+      rethrow;
+    }
+  }
+
+  @override
+  Future<void> removeAt(int index) async {
+    _timingEpoch++;
+    _timing.invalidate();
+    final source = _sources.removeAt(index);
+    try {
+      await _player.removeAudioSourceAt(index);
+    } on Object {
+      _sources.insert(index, source);
+      rethrow;
+    }
+    _closeSources([source]);
+  }
+
+  @override
+  Future<void> move(int from, int to) async {
+    _timingEpoch++;
+    _timing.invalidate();
+    final source = _sources.removeAt(from);
+    _sources.insert(to, source);
+    try {
+      await _player.moveAudioSource(from, to);
+    } on Object {
+      _sources.removeAt(to);
+      _sources.insert(from, source);
       rethrow;
     }
   }
