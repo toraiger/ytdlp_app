@@ -8,6 +8,8 @@ import 'controllers/mix_controller.dart';
 import 'controllers/playback_controller.dart';
 import 'models/api_models.dart';
 import 'models/api_timing.dart';
+import 'models/native_playback_timing.dart';
+import 'models/playback_diagnostics.dart';
 import 'screens/youtube_cookies_screen.dart';
 import 'services/api_client.dart';
 import 'services/app_settings.dart';
@@ -1128,6 +1130,52 @@ class _ConnectionDialogState extends State<_ConnectionDialog> {
   );
 }
 
+String _playbackReport(PlaybackDiagnostics info) {
+  final report = [
+    'Mix Player $appVersionLabel',
+    if (appRevision.isNotEmpty) 'コミット $appRevision',
+    '再生方式: ${info.mode == PlaybackMode.audio ? '音声' : '動画'}',
+    '一覧の曲番号: ${info.listIndex == null ? '—' : info.listIndex! + 1}',
+    'プレーヤー内の曲番号: ${info.playerIndex == null ? '—' : info.playerIndex! + 1}',
+    'キュー内の曲数: ${info.queueLength}',
+    '一覧の長さ: ${formatTime(info.listDuration)}',
+    '再生URL取得時の長さ: ${formatTime(info.apiDuration)}',
+    'メディアの長さ: ${formatTime(info.mediaDuration)}',
+    'メディアの経過時間: ${formatTime(info.mediaPosition)}',
+    '形式: ${info.formatId ?? '—'} / ${info.mediaExtension ?? '—'}',
+    '配信方式: ${info.mediaProtocol ?? '—'}',
+    '音声コーデック: ${info.audioCodec ?? '—'}',
+  ];
+  String time(Duration? value) =>
+      value == null
+          ? '—'
+          : '${formatTime(value)}.${(value.inMilliseconds % 1000).toString().padLeft(3, '0')}';
+  String index(int? value) => value == null ? '—' : '${value + 1}';
+  for (final timing in info.nativeTiming) {
+    final phase = switch (timing.phase) {
+      NativeTimingPhase.load => '初回読込後',
+      NativeTimingPhase.append => '先読み追加後',
+      NativeTimingPhase.seek => 'シーク後',
+      NativeTimingPhase.inspect => '表示時',
+    };
+    final source = switch (timing.durationSource) {
+      NativeDurationSource.item => '曲データ',
+      NativeDurationSource.seekable => 'シーク範囲',
+      NativeDurationSource.unknown => '不明',
+    };
+    report.addAll([
+      '[iOS $phase] 実曲:${index(timing.actualIndex)} 内部:${index(timing.storedIndex)} '
+          'キュー:${timing.queueLength} ソース:${timing.sourceCount}',
+      '項目の長さ: ${time(timing.itemDuration)} / 音源の長さ: ${time(timing.assetDuration)}',
+      'シーク範囲の開始: ${time(timing.seekableStart)} / 長さ: ${time(timing.seekableDuration)}',
+      'iOS現在位置: ${time(timing.position)} / 長さの取得元: $source',
+      if (timing.m4aHeaderFields != null)
+        'M4A初期ヘッダーの正規化: ${timing.m4aHeaderFields}か所',
+    ]);
+  }
+  return report.join('\n');
+}
+
 class _PlaybackDetails extends StatelessWidget {
   const _PlaybackDetails({required this.playback});
   final PlaybackController playback;
@@ -1137,20 +1185,13 @@ class _PlaybackDetails extends StatelessWidget {
     animation: playback,
     builder: (context, _) {
       final info = playback.diagnostics;
-      final report = [
-        'Mix Player $appVersionLabel',
-        if (appRevision.isNotEmpty) 'コミット $appRevision',
-        '再生方式: ${info.mode == PlaybackMode.audio ? '音声' : '動画'}',
-        '一覧の曲番号: ${info.listIndex == null ? '—' : info.listIndex! + 1}',
-        'プレーヤー内の曲番号: ${info.playerIndex == null ? '—' : info.playerIndex! + 1}',
-        'キュー内の曲数: ${info.queueLength}',
-        '一覧の長さ: ${formatTime(info.listDuration)}',
-        'メディアの長さ: ${formatTime(info.mediaDuration)}',
-        'メディアの経過時間: ${formatTime(info.mediaPosition)}',
-      ].join('\n');
+      final report = _playbackReport(info);
       return ExpansionTile(
         tilePadding: EdgeInsets.zero,
         title: const Text('再生情報', style: TextStyle(fontSize: 13)),
+        onExpansionChanged: (expanded) {
+          if (expanded) unawaited(playback.refreshNativeTiming());
+        },
         children: [
           Align(
             alignment: Alignment.centerLeft,
@@ -1160,7 +1201,12 @@ class _PlaybackDetails extends StatelessWidget {
             ),
           ),
           TextButton.icon(
-            onPressed: () => Clipboard.setData(ClipboardData(text: report)),
+            onPressed: () async {
+              await playback.refreshNativeTiming();
+              await Clipboard.setData(
+                ClipboardData(text: _playbackReport(playback.diagnostics)),
+              );
+            },
             icon: const Icon(Icons.copy_rounded, size: 16),
             label: const Text('再生情報をコピー'),
           ),

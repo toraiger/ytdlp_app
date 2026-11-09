@@ -104,6 +104,29 @@ void main() {
     response.complete(jsonResponse(streamJson('a')));
     expect(await first, same(await second));
   });
+  test('A response for another video is rejected and never cached', () async {
+    var requests = 0;
+    final api = mockApi((_) {
+      requests++;
+      return jsonResponse(streamJson(requests == 1 ? 'another-video' : 'a'));
+    });
+    addTearDown(api.close);
+    await expectLater(
+      api.resolveStream('a'),
+      throwsA(
+        isA<ApiFailure>().having(
+          (error) => error.message,
+          'message',
+          '再生 URL が要求した曲と一致しません。Mix を取得し直してください。',
+        ),
+      ),
+    );
+    expect(api.cachedMedia('a', PlaybackMode.audio), isNull);
+    expect(api.cachedMedia('another-video', PlaybackMode.audio), isNull);
+    final response = await api.resolveStream('a');
+    expect(response.videoId, 'a');
+    expect(requests, 2);
+  });
   test('Cached URLs expire after five minutes', () async {
     var now = DateTime.utc(2026, 10, 29);
     var requests = 0;

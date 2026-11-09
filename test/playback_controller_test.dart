@@ -450,6 +450,124 @@ void main() {
     },
   );
   test(
+    'Resolved metadata follows the selected and automatically advanced track',
+    () async {
+      resolveOverride = (id) {
+        final result = streamJson(id);
+        result['duration'] = id == 'a' ? 237.125 : 235.25;
+        (result['audio'] as Map<String, dynamic>).addAll(<String, Object>{
+          'format_id': id == 'a' ? '140' : '141',
+          'ext': 'm4a',
+          'protocol': 'https',
+          'acodec': 'mp4a.40.2',
+        });
+        return jsonResponse(result);
+      };
+      await playback.playTrack(0);
+      await drain();
+      expect(playback.error, isNull);
+      expect(
+        audio.entries.first.streamDuration,
+        const Duration(milliseconds: 237125),
+      );
+      expect(
+        audio.entries[1].streamDuration,
+        const Duration(milliseconds: 235250),
+      );
+      audio.durationEvents.add(const Duration(seconds: 473));
+      audio.positionEvents.add(const Duration(seconds: 362));
+      final info = playback.diagnostics;
+      expect(info.listDuration, const Duration(seconds: 120));
+      expect(info.apiDuration, const Duration(milliseconds: 237125));
+      expect(info.mediaDuration, const Duration(seconds: 473));
+      expect(info.formatId, '140');
+      expect(info.mediaExtension, 'm4a');
+      expect(info.mediaProtocol, 'https');
+      expect(info.audioCodec, 'mp4a.40.2');
+      // A metadata difference must not cut off playback or invent a transition.
+      expect(playback.currentIndex, 0);
+      expect(playback.duration, const Duration(seconds: 473));
+      expect(playback.position, const Duration(seconds: 362));
+
+      audio.advance(1, duration: const Duration(seconds: 235));
+      expect(playback.currentIndex, 1);
+      expect(playback.position, Duration.zero);
+      expect(
+        playback.diagnostics.apiDuration,
+        const Duration(milliseconds: 235250),
+      );
+      expect(playback.diagnostics.formatId, '141');
+
+      await playback.playTrack(0);
+      expect(
+        playback.diagnostics.apiDuration,
+        const Duration(milliseconds: 237125),
+      );
+      expect(playback.diagnostics.formatId, '140');
+      await playback.playDirect('https://media.example.test/direct.m4a');
+      expect(playback.diagnostics.apiDuration, isNull);
+      expect(playback.diagnostics.formatId, isNull);
+      await playback.stop();
+      expect(playback.diagnostics.apiDuration, isNull);
+      expect(playback.diagnostics.mediaProtocol, isNull);
+    },
+  );
+  test(
+    'Unknown native duration prefers the full stream lookup over list metadata',
+    () async {
+      resolveOverride =
+          (id) => jsonResponse({...streamJson(id), 'duration': 237.125});
+      await playback.playTrack(0);
+      await drain();
+      audio.durationEvents.add(null);
+      expect(playback.duration, const Duration(milliseconds: 237125));
+      expect(playback.diagnostics.mediaDuration, isNull);
+      audio.durationEvents.add(Duration.zero);
+      expect(playback.duration, const Duration(milliseconds: 237125));
+      audio.durationEvents.add(const Duration(seconds: 238));
+      expect(playback.duration, const Duration(seconds: 238));
+    },
+  );
+  test(
+    'An unknown stream duration still falls back to the listed length',
+    () async {
+      resolveOverride =
+          (id) => jsonResponse({...streamJson(id), 'duration': 0});
+      await playback.playTrack(0);
+      await drain();
+      audio.durationEvents.add(null);
+      expect(playback.duration, const Duration(seconds: 120));
+    },
+  );
+  test(
+    'Video diagnostics use the selected video format and API duration',
+    () async {
+      resolveOverride = (id) {
+        final result = streamJson(id)..['duration'] = 237.125;
+        (result['video_audio'] as Map<String, dynamic>).addAll(<String, Object>{
+          'format_id': '18',
+          'ext': 'mp4',
+          'protocol': 'https',
+          'acodec': 'mp4a.40.2',
+        });
+        return jsonResponse(result);
+      };
+      await playback.setMode(PlaybackMode.video);
+      await playback.playTrack(0);
+      expect(playback.error, isNull);
+      videos.single.emit(const VideoStatus(initialized: true));
+      expect(playback.duration, const Duration(milliseconds: 237125));
+      expect(
+        playback.diagnostics.apiDuration,
+        const Duration(milliseconds: 237125),
+      );
+      expect(playback.diagnostics.formatId, '18');
+      expect(playback.diagnostics.mediaExtension, 'mp4');
+      expect(playback.diagnostics.mediaDuration, Duration.zero);
+      expect(playback.diagnostics.playerIndex, isNull);
+    },
+  );
+  test(
     'Direct playback makes no stream requests and has no next track',
     () async {
       await playback.playDirect(

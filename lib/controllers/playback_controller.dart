@@ -13,6 +13,8 @@ import 'mix_controller.dart';
 typedef VideoEngineFactory =
     VideoEngine Function(Uri uri, Map<String, String> httpHeaders);
 
+typedef _ResolvedMedia = ({StreamFormat? format, Duration? duration});
+
 class PlaybackController extends ChangeNotifier {
   PlaybackController({
     required this.mix,
@@ -42,6 +44,8 @@ class PlaybackController extends ChangeNotifier {
   late int _mixRevision;
   Stopwatch? _startupProgress;
   VideoEngine? _video;
+  StreamFormat? _currentMedia;
+  Duration? _streamDuration;
   int _generation = 0;
   int _selection = 0;
   int _seekRevision = 0;
@@ -85,6 +89,17 @@ class PlaybackController extends ChangeNotifier {
       listIndex: currentIndex,
       playerIndex: currentTrack == null ? null : audio?.index,
       listDuration: currentTrack?.duration,
+      apiDuration: _streamDuration,
+      formatId: _currentMedia?.formatId,
+      mediaExtension: _currentMedia?.ext,
+      mediaProtocol: _currentMedia?.protocol,
+      audioCodec: _currentMedia?.acodec,
+      nativeTiming:
+          mode == PlaybackMode.audio &&
+                  currentTrack != null &&
+                  _audio is NativeAudioTimingProvider
+              ? (_audio as NativeAudioTimingProvider).nativeTimingHistory
+              : const [],
       mediaDuration:
           currentTrack == null ? null : audio?.duration ?? video?.duration,
       mediaPosition:
@@ -95,6 +110,28 @@ class PlaybackController extends ChangeNotifier {
   }
 
   bool _isCurrent(int generation) => !_disposed && generation == _generation;
+
+  Future<void> refreshNativeTiming() async {
+    if (_disposed ||
+        mode != PlaybackMode.audio ||
+        currentTrack == null ||
+        _audio is! NativeAudioTimingProvider) {
+      return;
+    }
+    final generation = _generation;
+    final selection = _selection;
+    final track = currentTrack;
+    try {
+      await (_audio as NativeAudioTimingProvider).refreshNativeTiming();
+    } catch (_) {
+      // Optional diagnostics never change playback state or user-facing errors.
+    }
+    if (_isSelectionCurrent(generation, selection) &&
+        identical(track, currentTrack)) {
+      _notify();
+    }
+  }
+
   void _notify() {
     if (!_disposed) notifyListeners();
   }
@@ -163,9 +200,13 @@ class PlaybackController extends ChangeNotifier {
           mode: requestedMode,
           refresh: refresh,
         );
-        return requestedMode == PlaybackMode.audio
-            ? response.audio
-            : response.videoAudio;
+        return (
+          format:
+              requestedMode == PlaybackMode.audio
+                  ? response.audio
+                  : response.videoAudio,
+          duration: response.duration,
+        );
       },
     );
   }
@@ -183,14 +224,14 @@ class PlaybackController extends ChangeNotifier {
         title: '直接 URL テスト',
         channel: 'HTTPS stream',
       ),
-      resolve: (_) async => StreamFormat(url: uri),
+      resolve: (_) async => (format: StreamFormat(url: uri), duration: null),
     );
   }
 
   Future<void> _start(
     MixTrack track, {
     int? mixIndex,
-    required Future<StreamFormat?> Function(bool refresh) resolve,
+    required Future<_ResolvedMedia> Function(bool refresh) resolve,
     bool refresh = false,
     bool cached = false,
   }) async {
@@ -206,6 +247,8 @@ class PlaybackController extends ChangeNotifier {
     _queueIndex = 0;
     _nextCandidate = (mixIndex ?? 0) + 1;
     _attemptedExtendLength = null;
+    _currentMedia = null;
+    _streamDuration = null;
     currentTrack = track;
     currentIndex = mixIndex;
     isDirect = mixIndex == null;
@@ -220,7 +263,7 @@ class PlaybackController extends ChangeNotifier {
     try {
       // 両方のFutureに直ちにエラーハンドラーを付ける。終了処理中のAPI失敗も
       // 未処理例外にせず、新プレーヤーは終了処理とURL取得の両方を待って作る。
-      final results = await Future.wait<StreamFormat?>([
+      final results = await Future.wait<_ResolvedMedia?>([
         Future.sync(() => resolve(refresh)),
         (() async {
           await _releaseVideo();
@@ -229,12 +272,16 @@ class PlaybackController extends ChangeNotifier {
         })(),
       ]);
       if (!_isCurrent(generation)) return;
-      final media = results.first;
+      final resolved = results.first;
+      final media = resolved?.format;
       final uri = media?.url;
       if (media == null || uri == null) {
         throw const ApiFailure('この曲に再生可能な HTTPS URL がありません。別の曲をお試しください。');
       }
       resolvedMedia = true;
+      _currentMedia = media;
+      _streamDuration = resolved?.duration;
+      duration = _trackDuration(null);
       isResolvingUrl = false;
       _pendingAudioError = null;
       _notify();
@@ -244,6 +291,8 @@ class PlaybackController extends ChangeNotifier {
           uri: uri,
           mixIndex: mixIndex,
           httpHeaders: media.httpHeaders,
+          format: media,
+          streamDuration: _streamDuration,
         );
         _queue.add(entry);
         await measureStartup(
@@ -308,6 +357,8 @@ class PlaybackController extends ChangeNotifier {
     final generation = _generation;
     final selection = ++_selection;
     _startupProgress = Stopwatch()..start();
+    _currentMedia = null;
+    _streamDuration = null;
     currentTrack = track;
     currentIndex = mixIndex;
     isBusy = true;
@@ -329,6 +380,10 @@ class PlaybackController extends ChangeNotifier {
         await _startTrack(track, mixIndex, refresh: !prepared);
         return;
       }
+      final entry = _queue[queueIndex];
+      _currentMedia = entry.format;
+      _streamDuration = entry.streamDuration;
+      duration = _trackDuration(null);
       isResolvingUrl = false;
       await _mutateAudio(generation, () async {
         if (_isSelectionCurrent(generation, selection)) {
@@ -420,6 +475,8 @@ class PlaybackController extends ChangeNotifier {
             uri: uri,
             mixIndex: index,
             httpHeaders: media.httpHeaders,
+            format: media,
+            streamDuration: response.duration,
           );
           await _mutateAudio(generation, () async {
             await _audio.append(entry);
@@ -515,6 +572,8 @@ class PlaybackController extends ChangeNotifier {
               uri: uri,
               mixIndex: 0,
               httpHeaders: media.httpHeaders,
+              format: media,
+              streamDuration: response.duration,
             ),
           );
         _queueIndex = 0;
@@ -557,6 +616,8 @@ class PlaybackController extends ChangeNotifier {
     _queueIndex = index;
     currentTrack = entry.track;
     currentIndex = entry.mixIndex;
+    _currentMedia = entry.format;
+    _streamDuration = entry.streamDuration;
     duration = _trackDuration(snapshot.duration);
     position = _nonNegativePosition(snapshot.position);
     _recordFirstProgress();
@@ -710,10 +771,12 @@ class PlaybackController extends ChangeNotifier {
     }
   }
 
-  Duration _trackDuration(Duration? reported) =>
-      reported != null && reported > Duration.zero
-          ? reported
-          : currentTrack?.duration ?? Duration.zero;
+  Duration _trackDuration(Duration? reported) {
+    if (reported != null && reported > Duration.zero) return reported;
+    final resolved = _streamDuration;
+    if (resolved != null && resolved > Duration.zero) return resolved;
+    return currentTrack?.duration ?? Duration.zero;
+  }
 
   Duration _nonNegativePosition(Duration value) =>
       value < Duration.zero ? Duration.zero : value;
@@ -756,6 +819,8 @@ class PlaybackController extends ChangeNotifier {
     _canRefreshCurrent = false;
     _playbackFailed = false;
     _queue.clear();
+    _currentMedia = null;
+    _streamDuration = null;
     currentTrack = null;
     currentIndex = null;
     isDirect = false;

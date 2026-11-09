@@ -8,6 +8,11 @@ on:
       - '.flutter-version'
       - 'ios/**'
       - 'lib/**'
+      - 'packages/just_audio/**'
+      - 'test/native/**'
+      - 'test/fixtures/**'
+      - 'scripts/test_native_audio.sh'
+      - 'scripts/normalize_m4a_fixture.dart'
       - 'assets/**'
       - 'pubspec.yaml'
       - 'pubspec.lock'
@@ -40,6 +45,8 @@ jobs:
           channel: stable
           cache: true
       - run: flutter pub get --enforce-lockfile
+      - name: Test native audio timing, completion order and M4A assets
+        run: bash scripts/test_native_audio.sh
       - name: Build release app for iPhone without signing
         run: bash scripts/build_app.sh ios --release --no-codesign --no-pub
       - name: Package unsigned IPA
