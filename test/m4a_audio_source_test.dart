@@ -395,6 +395,63 @@ void main() {
     );
   });
 
+  for (final validatorHeader in ['etag', 'last-modified']) {
+    for (final status in [200, 206]) {
+      test(
+        'Missing $validatorHeader is ${status == 206 ? 'allowed for conditional 206' : 'rejected for 200'}',
+        () async {
+          final large = Uint8List.fromList([
+            ...original,
+            ...List.filled(100000, 7),
+          ]);
+          final validator =
+              validatorHeader == 'etag'
+                  ? '"version-1"'
+                  : 'Mon, 09 Nov 2026 00:00:00 GMT';
+          var calls = 0;
+          final source = IosM4aAudioSource(
+            Uri.https('media.example.test', '/audio'),
+            headers: {},
+            client: MockClient.streaming((request, _) async {
+              if (calls++ == 0) {
+                return http.StreamedResponse(
+                  Stream.value(large.sublist(0, 65536)),
+                  206,
+                  contentLength: 65536,
+                  headers: {
+                    'content-range': 'bytes 0-65535/${large.length}',
+                    validatorHeader: validator,
+                  },
+                );
+              }
+              expect(request.headers['If-Range'], validator);
+              final start = status == 200 ? 0 : 65536;
+              return http.StreamedResponse(
+                Stream.value(large.sublist(start)),
+                status,
+                contentLength: large.length - start,
+                headers: {
+                  if (status == 206)
+                    'content-range':
+                        'bytes $start-${large.length - 1}/${large.length}',
+                },
+              );
+            }),
+          );
+          addTearDown(source.close);
+          final response = await source.request();
+          final output = response.stream.expand((b) => b).toList();
+          if (status == 206) {
+            expect(await output, header.apply(large, 0));
+          } else {
+            await expectLater(output, throwsStateError);
+            await expectLater(source.request(0, 2), throwsStateError);
+          }
+        },
+      );
+    }
+  }
+
   for (final response in [
     http.StreamedResponse(Stream.value([1, 2]), 403),
     http.StreamedResponse(

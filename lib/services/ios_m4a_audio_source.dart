@@ -141,11 +141,15 @@ class IosM4aAudioSource extends StreamAudioSource {
       if (_length != null &&
           (length != _length ||
               (_validator != null &&
-                  response.headers[_validatorHeader] != _validator))) {
+                  response.headers[_validatorHeader] != _validator &&
+                  (response.statusCode != 206 ||
+                      response.headers.containsKey(_validatorHeader))))) {
         // A response from another representation must not reuse cached bytes.
         this.close();
         throw _failure();
       }
+      // A 206 already confirms If-Range; representation headers can be omitted.
+      // A 200 needs an explicit matching validator before cached bytes are used.
       if (_length == null) {
         final etag = response.headers['etag'];
         if (etag != null && !etag.startsWith('W/')) {
