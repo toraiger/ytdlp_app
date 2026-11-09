@@ -49,6 +49,7 @@ class IosM4aAudioSource extends StreamAudioSource {
   M4aFragmentHeader _header = const M4aFragmentHeader([]);
   int? _length;
   String? _validator;
+  String? _validatorHeader;
   bool _closed = false;
 
   int? get normalizedDurationFields =>
@@ -83,9 +84,13 @@ class IosM4aAudioSource extends StreamAudioSource {
     }
   }
 
-  Future<_MediaResponse> _open(int start, int end) async {
+  Future<_MediaResponse> _open(
+    int start,
+    int end, {
+    Completer<void>? cancellation,
+  }) async {
     if (_closed) throw _failure();
-    final abort = Completer<void>();
+    final abort = cancellation ?? Completer<void>();
     _requests.add(abort);
     void close() {
       if (!abort.isCompleted) abort.complete();
@@ -100,6 +105,7 @@ class IosM4aAudioSource extends StreamAudioSource {
       if (_validator != null) request.headers['If-Range'] = _validator!;
       final response = await _client.send(request).timeout(timeout);
       if (_closed ||
+          abort.isCompleted ||
           !{'', 'identity'}.contains(
             (response.headers['content-encoding'] ?? '').toLowerCase(),
           )) {
@@ -129,15 +135,28 @@ class IosM4aAudioSource extends StreamAudioSource {
       } else {
         throw _failure();
       }
-      if (length <= 0 || (_length != null && length != _length)) {
+      if (length <= 0) {
         throw _failure();
       }
+      if (_length != null &&
+          (length != _length ||
+              (_validator != null &&
+                  response.headers[_validatorHeader] != _validator))) {
+        // A response from another representation must not reuse cached bytes.
+        this.close();
+        throw _failure();
+      }
+      if (_length == null) {
+        final etag = response.headers['etag'];
+        if (etag != null && !etag.startsWith('W/')) {
+          _validatorHeader = 'etag';
+          _validator = etag;
+        } else if (response.headers['last-modified'] != null) {
+          _validatorHeader = 'last-modified';
+          _validator = response.headers['last-modified'];
+        }
+      }
       _length = length;
-      final etag = response.headers['etag'];
-      _validator ??=
-          etag != null && !etag.startsWith('W/')
-              ? etag
-              : response.headers['last-modified'];
       return _MediaResponse(response.stream, offset, close);
     } on Object {
       close();
@@ -185,21 +204,77 @@ class IosM4aAudioSource extends StreamAudioSource {
     );
   }
 
-  Stream<List<int>> _serve(int start, int end) async* {
-    if (_closed) throw _failure();
-    var at = start;
-    if (at < _prefix.length) {
-      final to = math.min(end, _prefix.length);
-      yield _header.apply(_prefix.sublist(at, to), at);
-      at = to;
-    }
-    if (at < end) {
-      final response = await _open(at, end);
-      await for (final chunk in _slice(response, at, end)) {
-        yield _header.apply(chunk, at);
-        at += chunk.length;
+  Stream<List<int>> _serve(int start, int end) {
+    late StreamController<List<int>> controller;
+    StreamSubscription<List<int>>? subscription;
+    Completer<void>? cancellation;
+    var finished = false;
+
+    void stop() {
+      final abort = cancellation;
+      if (abort != null && !abort.isCompleted) abort.complete();
+      final pending = subscription?.cancel();
+      if (pending != null) {
+        // async* cancellation can wait for an idle upstream and then fail.
+        // Abort it directly above and consume cleanup errors independently.
+        unawaited(
+          pending.then<void>((_) {}, onError: (Object _, StackTrace __) {}),
+        );
       }
     }
+
+    void finish({bool failed = false}) {
+      if (finished) return;
+      finished = true;
+      stop();
+      if (failed) controller.addError(_failure());
+      unawaited(controller.close());
+    }
+
+    Future<void> serve() async {
+      try {
+        if (_closed) throw _failure();
+        var at = start;
+        if (at < _prefix.length) {
+          final to = math.min(end, _prefix.length);
+          controller.add(_header.apply(_prefix.sublist(at, to), at));
+          at = to;
+        }
+        if (at >= end) {
+          finish();
+          return;
+        }
+        final abort = cancellation = Completer<void>();
+        final response = await _open(at, end, cancellation: abort);
+        if (finished) {
+          response.close();
+          return;
+        }
+        subscription = _slice(response, at, end).listen(
+          (chunk) {
+            if (finished) return;
+            controller.add(_header.apply(chunk, at));
+            at += chunk.length;
+          },
+          onError: (Object _, StackTrace __) => finish(failed: true),
+          onDone: finish,
+        );
+        if (controller.isPaused) subscription!.pause();
+      } on Object {
+        finish(failed: true);
+      }
+    }
+
+    controller = StreamController<List<int>>(
+      onListen: () => unawaited(serve()),
+      onPause: () => subscription?.pause(),
+      onResume: () => subscription?.resume(),
+      onCancel: () {
+        finished = true;
+        stop();
+      },
+    );
+    return controller.stream;
   }
 
   void close() {

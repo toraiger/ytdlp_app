@@ -243,6 +243,158 @@ void main() {
     },
   );
 
+  for (final waitingForHeaders in [false, true]) {
+    test(
+      'Cancelling a range aborts while waiting for ${waitingForHeaders ? 'headers' : 'body'}',
+      () async {
+        final large = Uint8List.fromList([
+          ...original,
+          ...List.filled(100000, 7),
+        ]);
+        final started = Completer<void>();
+        final aborted = Completer<void>();
+        final body = StreamController<List<int>>(
+          onListen: () {
+            if (!started.isCompleted) started.complete();
+          },
+        );
+        var calls = 0;
+        final source = IosM4aAudioSource(
+          Uri.https('media.example.test', '/audio'),
+          headers: {},
+          timeout: const Duration(seconds: 5),
+          client: MockClient.streaming((request, _) async {
+            if (calls++ == 0) {
+              return http.StreamedResponse(
+                Stream.value(large.sublist(0, 65536)),
+                206,
+                contentLength: 65536,
+                headers: {'content-range': 'bytes 0-65535/${large.length}'},
+              );
+            }
+            unawaited(
+              (request as http.Abortable).abortTrigger!.then((_) {
+                aborted.complete();
+                unawaited(body.close());
+              }),
+            );
+            if (waitingForHeaders) {
+              started.complete();
+              await aborted.future;
+              throw http.ClientException('private', request.url);
+            }
+            return http.StreamedResponse(
+              body.stream,
+              206,
+              contentLength: 1000,
+              headers: {'content-range': 'bytes 70000-70999/${large.length}'},
+            );
+          }),
+        );
+        addTearDown(source.close);
+        final response = await source.request(70000, 71000);
+        final errors = <Object>[];
+        final subscription = response.stream.listen(
+          (_) {},
+          onError: errors.add,
+        );
+        await started.future;
+        await subscription.cancel().timeout(const Duration(seconds: 1));
+        await aborted.future.timeout(const Duration(seconds: 1));
+        await Future<void>.delayed(Duration.zero);
+        expect(errors, isEmpty);
+      },
+    );
+  }
+
+  for (final validatorHeader in ['etag', 'last-modified']) {
+    for (final status in [200, 206]) {
+      test(
+        'Changed $validatorHeader rejects same-size $status media',
+        () async {
+          final large = Uint8List.fromList([
+            ...original,
+            ...List.filled(100000, 7),
+          ]);
+          final updated = Uint8List.fromList(large)..[50000] = 8;
+          updated[80000] = 9;
+          final before =
+              validatorHeader == 'etag'
+                  ? '"version-1"'
+                  : 'Mon, 09 Nov 2026 00:00:00 GMT';
+          final after =
+              validatorHeader == 'etag'
+                  ? '"version-2"'
+                  : 'Mon, 09 Nov 2026 01:00:00 GMT';
+          var calls = 0;
+          final source = IosM4aAudioSource(
+            Uri.https('media.example.test', '/audio'),
+            headers: {},
+            client: MockClient.streaming((request, _) async {
+              if (calls++ == 0) {
+                return http.StreamedResponse(
+                  Stream.value(large.sublist(0, 65536)),
+                  206,
+                  contentLength: 65536,
+                  headers: {
+                    'content-range': 'bytes 0-65535/${large.length}',
+                    validatorHeader: before,
+                  },
+                );
+              }
+              expect(request.headers['If-Range'], before);
+              final start = status == 200 ? 0 : 65536;
+              return http.StreamedResponse(
+                Stream.value(updated.sublist(start)),
+                status,
+                contentLength: updated.length - start,
+                headers: {
+                  validatorHeader: after,
+                  if (status == 206)
+                    'content-range':
+                        'bytes $start-${updated.length - 1}/${updated.length}',
+                },
+              );
+            }),
+          );
+          addTearDown(source.close);
+          final response = await source.request();
+          final output = <int>[];
+          await expectLater(
+            response.stream.forEach(output.addAll),
+            throwsStateError,
+          );
+          expect(output.length, lessThanOrEqualTo(65536));
+          await expectLater(source.request(0, 2), throwsStateError);
+        },
+      );
+    }
+  }
+
+  test('Unchanged ETag permits a server that ignores Range', () async {
+    final large = Uint8List.fromList([...original, ...List.filled(100000, 7)]);
+    var calls = 0;
+    final source = IosM4aAudioSource(
+      Uri.https('media.example.test', '/audio'),
+      headers: {},
+      client: MockClient.streaming((request, _) async {
+        if (calls++ > 0) expect(request.headers['If-Range'], '"same-version"');
+        return http.StreamedResponse(
+          Stream.value(large),
+          200,
+          contentLength: large.length,
+          headers: {'etag': '"same-version"'},
+        );
+      }),
+    );
+    addTearDown(source.close);
+    final response = await source.request();
+    expect(
+      await response.stream.expand((b) => b).toList(),
+      header.apply(large, 0),
+    );
+  });
+
   for (final response in [
     http.StreamedResponse(Stream.value([1, 2]), 403),
     http.StreamedResponse(
