@@ -2502,7 +2502,7 @@ class _ProxyHttpServer {
   }
 
   Uri _sourceUri(StreamAudioSource source) => Uri.http(
-      '${InternetAddress.loopbackIPv4.address}:$port', '/id/${source._id}');
+      'localhost:$port', '/id/${source._id}');
 
   /// A unique key for each request that can be processed by this proxy,
   /// made up of the URL path and query string. It is not possible to
@@ -3301,7 +3301,8 @@ Uri _encodeDataUrl(String base64Data, String mimeType) =>
 @experimental
 abstract class StreamAudioSource extends IndexedAudioSource {
   Uri? _uri;
-  StreamAudioSource({dynamic tag}) : super(tag: tag);
+  final ProgressiveAudioSourceOptions? options;
+  StreamAudioSource({dynamic tag, this.options}) : super(tag: tag);
 
   @override
   Future<void> _onLoad() async {
@@ -3325,7 +3326,8 @@ abstract class StreamAudioSource extends IndexedAudioSource {
 
   @override
   AudioSourceMessage _toMessage() => ProgressiveAudioSourceMessage(
-      id: _id, uri: _uri.toString(), headers: null, tag: tag);
+      id: _id, uri: _uri.toString(), headers: null, tag: tag,
+      options: options?._toMessage());
 }
 
 /// The response for a [StreamAudioSource]. This API is experimental.
@@ -3792,16 +3794,30 @@ _ProxyHandler _proxyHandlerForSource(StreamAudioSource source) {
     }
 
     final completer = Completer<void>();
-    final subscription = stream.listen(request.response.add,
-        onError: (e, st) {}, onDone: completer.complete);
-
-    request.response.done.then((dynamic value) {
-      subscription.cancel();
-    });
-
+    void finish() {
+      if (!completer.isCompleted) completer.complete();
+    }
+    final subscription = stream.listen((data) {
+      try {
+        request.response.add(data);
+      } catch (_) {
+        finish();
+      }
+    }, onError: (Object e, StackTrace st) { finish(); }, onDone: finish);
+    unawaited(request.response.done.then<void>((_) async {
+      await subscription.cancel();
+      finish();
+    }, onError: (Object e, StackTrace st) async {
+      await subscription.cancel();
+      finish();
+    }));
     await completer.future;
-
-    await request.response.close();
+    await subscription.cancel();
+    try {
+      await request.response.close();
+    } catch (_) {
+      // Native seeks/reloads can close the loopback connection mid-response.
+    }
   }
 
   return handler;

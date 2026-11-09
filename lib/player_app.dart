@@ -1169,6 +1169,8 @@ String _playbackReport(PlaybackDiagnostics info) {
       '項目の長さ: ${time(timing.itemDuration)} / 音源の長さ: ${time(timing.assetDuration)}',
       'シーク範囲の開始: ${time(timing.seekableStart)} / 長さ: ${time(timing.seekableDuration)}',
       'iOS現在位置: ${time(timing.position)} / 長さの取得元: $source',
+      if (timing.m4aHeaderFields != null)
+        'M4A初期ヘッダーの正規化: ${timing.m4aHeaderFields}か所',
     ]);
   }
   return report.join('\n');

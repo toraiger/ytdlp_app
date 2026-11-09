@@ -16,6 +16,7 @@ void main() {
       'queueLength': 2,
       'sourceCount': 3,
       'durationSource': 'item',
+      'm4aHeaderFields': 3,
       'url': 'https://must-not-be-stored.test/private',
     }, NativeTimingPhase.inspect);
     expect(timing.itemDuration, const Duration(milliseconds: 237125));
@@ -28,6 +29,7 @@ void main() {
     expect(timing.queueLength, 2);
     expect(timing.sourceCount, 3);
     expect(timing.durationSource, NativeDurationSource.item);
+    expect(timing.m4aHeaderFields, 3);
   });
   test('Unavailable or malformed native values remain unknown', () {
     final timing = NativePlaybackTiming.fromMap({
@@ -38,6 +40,7 @@ void main() {
       'storedIndex': 1.5,
       'queueLength': -1,
       'durationSource': 'do-not-copy-secret',
+      'm4aHeaderFields': 'do-not-copy-secret',
     }, NativeTimingPhase.load);
     expect(timing.itemDuration, isNull);
     expect(timing.assetDuration, isNull);
@@ -46,6 +49,7 @@ void main() {
     expect(timing.storedIndex, isNull);
     expect(timing.queueLength, 0);
     expect(timing.durationSource, NativeDurationSource.unknown);
+    expect(timing.m4aHeaderFields, isNull);
   });
   test('History keeps the latest eight immutable snapshots', () async {
     var position = 0;

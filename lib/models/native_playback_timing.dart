@@ -16,6 +16,7 @@ class NativePlaybackTiming {
     this.position,
     this.actualIndex,
     this.storedIndex,
+    this.m4aHeaderFields,
   });
 
   factory NativePlaybackTiming.fromMap(
@@ -48,6 +49,7 @@ class NativePlaybackTiming {
       storedIndex: nonNegative('storedIndex'),
       queueLength: nonNegative('queueLength') ?? 0,
       sourceCount: nonNegative('sourceCount') ?? 0,
+      m4aHeaderFields: nonNegative('m4aHeaderFields'),
     );
   }
 
@@ -62,6 +64,7 @@ class NativePlaybackTiming {
   final int? storedIndex;
   final int queueLength;
   final int sourceCount;
+  final int? m4aHeaderFields;
 }
 
 /// Bounded, in-memory history. Replaced loads/seeks cannot publish late replies.

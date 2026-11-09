@@ -6,6 +6,7 @@ import 'package:video_player/video_player.dart';
 
 import '../models/api_models.dart';
 import '../models/native_playback_timing.dart';
+import 'ios_m4a_audio_source.dart';
 
 enum AudioPhase { idle, loading, ready, completed }
 
@@ -45,7 +46,7 @@ class QueueEntry {
 }
 
 /// Preserve manifest transports even when the signed URL has no file extension.
-AudioSource createAudioSource(QueueEntry entry) {
+AudioSource createAudioSource(QueueEntry entry, {TargetPlatform? platform}) {
   final tag = MediaItem(
     id: entry.track.videoId,
     title: entry.track.title,
@@ -66,6 +67,12 @@ AudioSource createAudioSource(QueueEntry entry) {
     tag: tag,
   );
   if (source is! ProgressiveAudioSource) return source;
+  if (!kIsWeb &&
+      (platform ?? defaultTargetPlatform) == TargetPlatform.iOS &&
+      entry.format?.ext == 'm4a' &&
+      (entry.format?.acodec?.startsWith('mp4a.') ?? false)) {
+    return IosM4aAudioSource(entry.uri, headers: entry.httpHeaders, tag: tag);
+  }
   // AVPlayer's default timing is approximate. Request precise timing for VOD
   // without changing the media's duration or clipping it to list metadata.
   return ProgressiveAudioSource(
@@ -103,14 +110,28 @@ abstract interface class NativeAudioTimingProvider {
 
 class JustAudioEngine implements AudioEngine, NativeAudioTimingProvider {
   final AudioPlayer _player = AudioPlayer(useProxyForRequestHeaders: false);
-  final NativeTimingRecorder _timing = NativeTimingRecorder(_readNativeTiming);
+  late final NativeTimingRecorder _timing = NativeTimingRecorder(
+    _readNativeTiming,
+  );
+  final _sources = <AudioSource>[];
   int _timingEpoch = 0;
 
-  static Future<Map<Object?, Object?>?> _readNativeTiming() async {
+  Future<Map<Object?, Object?>?> _readNativeTiming() async {
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return null;
-    return const MethodChannel(
+    final timing = await const MethodChannel(
       'com.ryanheise.just_audio.methods',
     ).invokeMapMethod<Object?, Object?>('mixGetNativeTiming');
+    final index = timing?['actualIndex'];
+    if (timing != null &&
+        index is int &&
+        index >= 0 &&
+        index < _sources.length) {
+      final source = _sources[index];
+      if (source is IosM4aAudioSource) {
+        timing['m4aHeaderFields'] = source.normalizedDurationFields;
+      }
+    }
+    return timing;
   }
 
   @override
@@ -166,15 +187,32 @@ class JustAudioEngine implements AudioEngine, NativeAudioTimingProvider {
   Future<void> load(QueueEntry entry) async {
     final epoch = ++_timingEpoch;
     _timing.invalidate(clear: true);
-    await _player.setAudioSources([createAudioSource(entry)]);
-    await _captureTiming(NativeTimingPhase.load, epoch: epoch);
+    final source = createAudioSource(entry);
+    final previous = _sources.toList();
+    _sources
+      ..clear()
+      ..add(source);
+    try {
+      await _player.setAudioSources([source]);
+      await _captureTiming(NativeTimingPhase.load, epoch: epoch);
+    } finally {
+      _closeSources(previous);
+    }
   }
 
   @override
   Future<void> append(QueueEntry entry) async {
     final epoch = _timingEpoch;
-    await _player.addAudioSource(createAudioSource(entry));
-    await _captureTiming(NativeTimingPhase.append, epoch: epoch);
+    final source = createAudioSource(entry);
+    _sources.add(source);
+    try {
+      await _player.addAudioSource(source);
+      await _captureTiming(NativeTimingPhase.append, epoch: epoch);
+    } on Object {
+      _sources.remove(source);
+      _closeSources([source]);
+      rethrow;
+    }
   }
 
   @override
@@ -197,10 +235,21 @@ class JustAudioEngine implements AudioEngine, NativeAudioTimingProvider {
   }
 
   @override
-  Future<void> dispose() {
+  Future<void> dispose() async {
     _timingEpoch++;
     _timing.invalidate(clear: true);
-    return _player.dispose();
+    try {
+      await _player.dispose();
+    } finally {
+      _closeSources(_sources);
+      _sources.clear();
+    }
+  }
+
+  void _closeSources(Iterable<AudioSource> sources) {
+    for (final source in sources) {
+      if (source is IosM4aAudioSource) source.close();
+    }
   }
 }
 
