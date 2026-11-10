@@ -349,6 +349,10 @@ void main() {
       expect(copied, contains('項目の長さ: 03:57.000 / 音源の長さ: 03:57.000'));
       expect(copied, contains('シーク範囲の開始: 00:00.000 / 長さ: 07:53.000'));
       expect(copied, contains('長さの取得元: 曲データ'));
+      expect(copied, contains("M4A初期ヘッダーの正規化: 3か所"));
+      expect(copied, contains("M4A判定: 適用済み"));
+      expect(copied, contains("編集リスト: あり"));
+      expect(copied, contains("編集開始位置: 00:00.036 / 区間の長さ: 03:57.000"));
       expect(copied, isNot(contains('do-not-copy-video-id')));
       expect(copied, isNot(contains('do-not-copy-api-key')));
       expect(copied, isNot(contains('https://')));
@@ -373,6 +377,13 @@ class _DiagnosticAudioEngine extends FakeAudioEngine
       'queueLength': 2,
       'sourceCount': 3,
       'durationSource': 'item',
+      "m4aHeaderFields": 3,
+      "m4aHeaderOutcome": "normalized",
+      "m4aHasEditList": true,
+      "m4aEditVersion": 0,
+      "m4aEditEntryCount": 1,
+      "m4aEditStartUs": 36281,
+      "m4aEditDurationUs": 237000000,
       'url': 'https://must-not-be-copied.test/private',
       'videoId': 'do-not-copy-video-id',
       'headers': {'X-API-Key': 'do-not-copy-api-key'},

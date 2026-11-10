@@ -1,3 +1,6 @@
+import "m4a_header_diagnostics.dart";
+import "diagnostic_values.dart";
+
 enum NativeTimingPhase { load, append, seek, inspect }
 
 enum NativeDurationSource { unknown, item, seekable }
@@ -17,39 +20,33 @@ class NativePlaybackTiming {
     this.actualIndex,
     this.storedIndex,
     this.m4aHeaderFields,
+    this.m4aHeaderDiagnostics,
   });
 
   factory NativePlaybackTiming.fromMap(
     Map<Object?, Object?> data,
     NativeTimingPhase phase,
   ) {
-    int? nonNegative(String key) {
-      final value = data[key];
-      return value is int && value >= 0 ? value : null;
-    }
-
-    Duration? time(String key) {
-      final value = nonNegative(key);
-      return value == null ? null : Duration(microseconds: value);
-    }
+    final values = DiagnosticValues(data);
 
     return NativePlaybackTiming(
       phase: phase,
-      durationSource: switch (data['durationSource']) {
-        'item' => NativeDurationSource.item,
-        'seekable' => NativeDurationSource.seekable,
+      durationSource: switch (data["durationSource"]) {
+        "item" => NativeDurationSource.item,
+        "seekable" => NativeDurationSource.seekable,
         _ => NativeDurationSource.unknown,
       },
-      itemDuration: time('itemDurationUs'),
-      assetDuration: time('assetDurationUs'),
-      seekableStart: time('seekableStartUs'),
-      seekableDuration: time('seekableDurationUs'),
-      position: time('positionUs'),
-      actualIndex: nonNegative('actualIndex'),
-      storedIndex: nonNegative('storedIndex'),
-      queueLength: nonNegative('queueLength') ?? 0,
-      sourceCount: nonNegative('sourceCount') ?? 0,
-      m4aHeaderFields: nonNegative('m4aHeaderFields'),
+      itemDuration: values.time("itemDurationUs"),
+      assetDuration: values.time("assetDurationUs"),
+      seekableStart: values.time("seekableStartUs"),
+      seekableDuration: values.time("seekableDurationUs"),
+      position: values.time("positionUs"),
+      actualIndex: values.nonNegative("actualIndex"),
+      storedIndex: values.nonNegative("storedIndex"),
+      queueLength: values.nonNegative("queueLength") ?? 0,
+      sourceCount: values.nonNegative("sourceCount") ?? 0,
+      m4aHeaderFields: values.nonNegative("m4aHeaderFields"),
+      m4aHeaderDiagnostics: M4aHeaderDiagnostics.fromMap(data),
     );
   }
 
@@ -65,6 +62,7 @@ class NativePlaybackTiming {
   final int queueLength;
   final int sourceCount;
   final int? m4aHeaderFields;
+  final M4aHeaderDiagnostics? m4aHeaderDiagnostics;
 }
 
 /// Bounded, in-memory history. Replaced loads/seeks cannot publish late replies.

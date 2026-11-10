@@ -129,6 +129,7 @@ class JustAudioEngine implements AudioEngine, NativeAudioTimingProvider {
       final source = _sources[index];
       if (source is IosM4aAudioSource) {
         timing['m4aHeaderFields'] = source.normalizedDurationFields;
+        timing.addAll(source.headerDiagnostics.toMap());
       }
     }
     return timing;

@@ -9,6 +9,7 @@ import 'controllers/playback_controller.dart';
 import 'models/api_models.dart';
 import 'models/api_timing.dart';
 import 'models/native_playback_timing.dart';
+import "models/m4a_header_diagnostics.dart";
 import 'models/playback_diagnostics.dart';
 import 'screens/youtube_cookies_screen.dart';
 import 'services/api_client.dart';
@@ -1171,6 +1172,24 @@ String _playbackReport(PlaybackDiagnostics info) {
       'iOS現在位置: ${time(timing.position)} / 長さの取得元: $source',
       if (timing.m4aHeaderFields != null)
         'M4A初期ヘッダーの正規化: ${timing.m4aHeaderFields}か所',
+      if (timing.m4aHeaderDiagnostics case final header?) ...[
+        "M4A判定: ${switch (header.outcome) {
+          M4aHeaderOutcome.pending => "未取得",
+          M4aHeaderOutcome.normalized => "適用済み",
+          M4aHeaderOutcome.notDash => "対象外（DASH以外）",
+          M4aHeaderOutcome.notFragmented => "対象外（分割形式以外）",
+          M4aHeaderOutcome.notAudio => "対象外（音声以外）",
+          M4aHeaderOutcome.populatedSamples => "対象外（初期サンプルあり）",
+          M4aHeaderOutcome.unsupportedEditList => "対象外（未対応の編集リスト）",
+          M4aHeaderOutcome.invalidHeader => "解析失敗",
+        }}",
+        if (header.hasEditList != null)
+          "編集リスト: ${header.hasEditList! ? "あり" : "なし"}",
+        if (header.editEntryCount != null)
+          "編集リスト形式: ${header.editVersion} / 区間数: ${header.editEntryCount}",
+        if (header.editStart != null)
+          "編集開始位置: ${time(header.editStart)} / 区間の長さ: ${time(header.editDuration)}",
+      ],
     ]);
   }
   return report.join('\n');

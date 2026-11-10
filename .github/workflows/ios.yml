@@ -13,6 +13,8 @@ on:
       - 'test/fixtures/**'
       - 'scripts/test_native_audio.sh'
       - 'scripts/normalize_m4a_fixture.dart'
+      - 'scripts/prepare_m4a_fixtures.dart'
+      - 'test/support/m4a_fixture.dart'
       - 'assets/**'
       - 'pubspec.yaml'
       - 'pubspec.lock'

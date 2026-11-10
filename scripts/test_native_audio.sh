@@ -19,9 +19,8 @@ xcrun clang -fobjc-arc -Wall -Wextra -Werror \
   -o "$mix_native_build/audio_timeline_test"
 "$mix_native_build/audio_timeline_test"
 
-cp "$mix_native_root/test/fixtures/dash-tone.m4a" "$mix_native_build/dash-tone.m4a"
-dart --suppress-analytics run "$mix_native_root/scripts/normalize_m4a_fixture.dart" \
-  "$mix_native_build/dash-tone.m4a" "$mix_native_build/normalized.m4a"
+dart --suppress-analytics run "$mix_native_root/scripts/prepare_m4a_fixtures.dart" \
+  "$mix_native_root/test/fixtures/dash-tone.m4a" "$mix_native_build"
 python3 "$mix_native_root/test/native/media_server.py" \
   "$mix_native_build" "$mix_native_build/port" &
 mix_media_pid=$!
@@ -35,5 +34,5 @@ xcrun clang -fobjc-arc -Wall -Wextra -Werror -Wno-deprecated-declarations \
   "$mix_native_root/test/native/m4a_asset_test.m" \
   -o "$mix_native_build/m4a_asset_test"
 "$mix_native_build/m4a_asset_test" \
-  "$mix_native_build/dash-tone.m4a" "$mix_native_build/normalized.m4a" \
+  "$mix_native_build/manifest.json" \
   "http://127.0.0.1:$mix_media_port"

@@ -1,12 +1,13 @@
-import 'dart:async';
-import 'dart:math' as math;
-import 'dart:typed_data';
+import "dart:async";
+import "dart:math" as math;
+import "dart:typed_data";
 
-import 'package:http/http.dart' as http;
-import 'package:just_audio/just_audio.dart';
+import "package:http/http.dart" as http;
+import "package:just_audio/just_audio.dart";
 
-import 'api_http_client.dart';
-import 'm4a_fragment_header.dart';
+import "api_http_client.dart";
+import "../models/m4a_header_diagnostics.dart";
+import "m4a_fragment_header.dart";
 
 /// Serves the original byte ranges with only empty DASH header durations reset.
 /// A bounded prefix is retained, so playback and seeking do not wait for a full
@@ -21,14 +22,14 @@ class IosM4aAudioSource extends StreamAudioSource {
   }) : _headers = {
          for (final entry in headers.entries)
            if (!{
-             'x-api-key',
-             'range',
-             'host',
-             'content-length',
-             'accept-encoding',
+             "x-api-key",
+             "range",
+             "host",
+             "content-length",
+             "accept-encoding",
            }.contains(entry.key.toLowerCase()))
              entry.key: entry.value,
-         'Accept-Encoding': 'identity',
+         "Accept-Encoding": "identity",
        },
        _client = client ?? createApiHttpClient(),
        super(
@@ -51,13 +52,17 @@ class IosM4aAudioSource extends StreamAudioSource {
   String? _validator;
   String? _validatorHeader;
   bool _closed = false;
+  bool _headerReady = false;
 
   int? get normalizedDurationFields =>
-      _prepared != null && _length != null
-          ? _header.durationFields.length
-          : null;
+      _headerReady ? _header.durationFields.length : null;
 
-  static StateError _failure() => StateError('Audio data unavailable');
+  M4aHeaderDiagnostics get headerDiagnostics =>
+      _headerReady
+          ? _header.diagnostics
+          : const M4aHeaderDiagnostics(outcome: M4aHeaderOutcome.pending);
+
+  static StateError _failure() => StateError("Audio data unavailable");
 
   Future<void> _prepare() async {
     var wanted = 64 * 1024;
@@ -78,7 +83,10 @@ class IosM4aAudioSource extends StreamAudioSource {
       _prefix = bytes.takeBytes();
       _header = M4aFragmentHeader.inspect(_prefix);
       final required = _header.requiredLength;
-      if (required == null) return;
+      if (required == null) {
+        _headerReady = true;
+        return;
+      }
       if (required <= wanted || required > _length!) throw _failure();
       wanted = required;
     }
@@ -99,15 +107,15 @@ class IosM4aAudioSource extends StreamAudioSource {
 
     try {
       final request =
-          http.AbortableRequest('GET', uri, abortTrigger: abort.future)
+          http.AbortableRequest("GET", uri, abortTrigger: abort.future)
             ..headers.addAll(_headers)
-            ..headers['Range'] = 'bytes=$start-${end - 1}';
-      if (_validator != null) request.headers['If-Range'] = _validator!;
+            ..headers["Range"] = "bytes=$start-${end - 1}";
+      if (_validator != null) request.headers["If-Range"] = _validator!;
       final response = await _client.send(request).timeout(timeout);
       if (_closed ||
           abort.isCompleted ||
-          !{'', 'identity'}.contains(
-            (response.headers['content-encoding'] ?? '').toLowerCase(),
+          !{"", "identity"}.contains(
+            (response.headers["content-encoding"] ?? "").toLowerCase(),
           )) {
         throw _failure();
       }
@@ -115,8 +123,8 @@ class IosM4aAudioSource extends StreamAudioSource {
       int offset;
       if (response.statusCode == 206) {
         final match = RegExp(
-          r'^bytes (\d+)-(\d+)/(\d+)$',
-        ).firstMatch(response.headers['content-range'] ?? '');
+          r"^bytes (\d+)-(\d+)/(\d+)$",
+        ).firstMatch(response.headers["content-range"] ?? "");
         if (match == null) throw _failure();
         offset = int.parse(match[1]!);
         final last = int.parse(match[2]!);
@@ -151,13 +159,13 @@ class IosM4aAudioSource extends StreamAudioSource {
       // A 206 already confirms If-Range; representation headers can be omitted.
       // A 200 needs an explicit matching validator before cached bytes are used.
       if (_length == null) {
-        final etag = response.headers['etag'];
-        if (etag != null && !etag.startsWith('W/')) {
-          _validatorHeader = 'etag';
+        final etag = response.headers["etag"];
+        if (etag != null && !etag.startsWith("W/")) {
+          _validatorHeader = "etag";
           _validator = etag;
-        } else if (response.headers['last-modified'] != null) {
-          _validatorHeader = 'last-modified';
-          _validator = response.headers['last-modified'];
+        } else if (response.headers["last-modified"] != null) {
+          _validatorHeader = "last-modified";
+          _validator = response.headers["last-modified"];
         }
       }
       _length = length;
@@ -203,7 +211,7 @@ class IosM4aAudioSource extends StreamAudioSource {
       sourceLength: _length,
       contentLength: to - from,
       offset: start != null || end != null ? from : null,
-      contentType: 'audio/mp4',
+      contentType: "audio/mp4",
       stream: _serve(from, to),
     );
   }
@@ -222,7 +230,10 @@ class IosM4aAudioSource extends StreamAudioSource {
         // async* cancellation can wait for an idle upstream and then fail.
         // Abort it directly above and consume cleanup errors independently.
         unawaited(
-          pending.then<void>((_) {}, onError: (Object _, StackTrace __) {}),
+          pending.then<void>(
+            (_) {},
+            onError: (Object ignoredError, StackTrace ignoredStack) {},
+          ),
         );
       }
     }
@@ -260,7 +271,9 @@ class IosM4aAudioSource extends StreamAudioSource {
             controller.add(_header.apply(chunk, at));
             at += chunk.length;
           },
-          onError: (Object _, StackTrace __) => finish(failed: true),
+          onError:
+              (Object ignoredError, StackTrace ignoredStack) =>
+                  finish(failed: true),
           onDone: finish,
         );
         if (controller.isPaused) subscription!.pause();
@@ -290,6 +303,7 @@ class IosM4aAudioSource extends StreamAudioSource {
     _requests.clear();
     _client.close();
     _prefix = Uint8List(0);
+    _headerReady = false;
   }
 }
 
