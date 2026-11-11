@@ -1,8 +1,10 @@
+import "package:flutter/services.dart";
 import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 import 'package:video_player/video_player.dart';
 
 import '../models/api_models.dart';
+import "error_report.dart";
 
 enum AudioPhase { idle, loading, ready, completed }
 
@@ -43,7 +45,7 @@ abstract interface class AudioEngine {
   Stream<Duration> get positions;
   Stream<Duration?> get durations;
   Stream<int?> get indexes;
-  Stream<String> get errors;
+  Stream<MediaFailure> get errors;
   Future<void> load(QueueEntry entry);
   Future<void> append(QueueEntry entry);
   Future<void> play();
@@ -95,8 +97,12 @@ class JustAudioEngine implements AudioEngine {
   @override
   Stream<int?> get indexes => _player.currentIndexStream;
   @override
-  Stream<String> get errors =>
-      _player.errorStream.map((_) => '音声を再生できません。曲を選び直して再生 URL を取得してください。');
+  Stream<MediaFailure> get errors => _player.errorStream.map(
+    (failure) => MediaFailure(
+      "音声を再生できません。曲を選び直して再生 URL を取得してください。",
+      details: FailureDetails.fromException(failure),
+    ),
+  );
   @override
   Future<void> load(QueueEntry entry) async {
     await _player.setAudioSources([_source(entry)]);
@@ -124,6 +130,7 @@ class VideoStatus {
     this.playing = false,
     this.completed = false,
     this.hasError = false,
+    this.failure,
     this.position = Duration.zero,
     this.duration = Duration.zero,
   });
@@ -131,6 +138,7 @@ class VideoStatus {
   final bool playing;
   final bool completed;
   final bool hasError;
+  final FailureDetails? failure;
   final Duration position;
   final Duration duration;
 }
@@ -159,18 +167,25 @@ class NativeVideoEngine implements VideoEngine {
   final VideoPlayerController controller;
   @override
   VideoStatus get value {
-    final v = controller.value;
+    final value = controller.value;
     return VideoStatus(
-      initialized: v.isInitialized,
-      playing: v.isPlaying,
+      initialized: value.isInitialized,
+      playing: value.isPlaying,
       completed:
-          v.isInitialized &&
-          v.duration > Duration.zero &&
-          v.position >= v.duration &&
-          !v.isPlaying,
-      hasError: v.hasError,
-      position: v.position,
-      duration: v.duration,
+          (value.isInitialized && !value.isPlaying) &&
+          (value.duration > Duration.zero && value.position >= value.duration),
+      hasError: value.hasError,
+      failure:
+          value.hasError
+              ? FailureDetails.fromException(
+                PlatformException(
+                  code: "VideoError",
+                  message: value.errorDescription,
+                ),
+              )
+              : null,
+      position: value.position,
+      duration: value.duration,
     );
   }
 

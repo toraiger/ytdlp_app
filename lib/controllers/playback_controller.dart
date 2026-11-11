@@ -6,6 +6,7 @@ import 'package:video_player/video_player.dart';
 import '../models/api_models.dart';
 import '../models/playback_diagnostics.dart';
 import '../services/api_client.dart';
+import "../services/error_report.dart";
 import '../services/playback_engines.dart';
 import '../services/startup_timing.dart';
 import 'mix_controller.dart';
@@ -58,8 +59,12 @@ class PlaybackController extends ChangeNotifier {
   ApiClient? _preparedApi;
   bool _firstMediaLoading = false;
   bool _canRefreshCurrent = false;
+  // 再取得の可否とは別に、今回読み込んだURLが再取得によるものかを残す。
+  bool _currentWasRefreshed = false;
   bool _playbackFailed = false;
-  String? _pendingAudioError;
+  MediaFailure? _pendingAudioError;
+  // アプリ起動直後に作るコントローラーの稼働時間で、時間経過に伴う失敗を調べる。
+  final _uptime = Stopwatch()..start();
 
   PlaybackMode mode = PlaybackMode.audio;
   MixTrack? currentTrack;
@@ -71,6 +76,7 @@ class PlaybackController extends ChangeNotifier {
   Duration position = Duration.zero;
   Duration duration = Duration.zero;
   String? error;
+  ErrorReport? errorReport;
 
   VideoPlayerController? get videoController => _video?.controller;
   int get upcomingCount => (_queue.length - _queueIndex - 1).clamp(0, 2);
@@ -97,6 +103,29 @@ class PlaybackController extends ChangeNotifier {
   bool _isCurrent(int generation) => !_disposed && generation == _generation;
   void _notify() {
     if (!_disposed) notifyListeners();
+  }
+
+  void _recordError(
+    String message, {
+    required String operation,
+    Object? failure,
+    bool? refreshed,
+  }) {
+    error = message;
+    errorReport = ErrorReport.capture(
+      operation: operation,
+      message: message,
+      failure: failure,
+      playback: diagnostics,
+      uptime: _uptime.elapsed,
+      refreshed: refreshed ?? _currentWasRefreshed,
+      apiTiming: mix.isConfigured ? mix.api.lastTiming.value : null,
+    );
+  }
+
+  void _clearError() {
+    error = null;
+    errorReport = null;
   }
 
   // Serialize native player mutations; stale API responses cannot modify a new queue.
@@ -173,7 +202,7 @@ class PlaybackController extends ChangeNotifier {
   Future<void> playDirect(String url) async {
     final uri = playableUri(url);
     if (uri == null) {
-      error = '直接再生には HTTPS のメディア URL を入力してください。';
+      _recordError("直接再生には HTTPS のメディア URL を入力してください。", operation: "直接URLの確認");
       _notify();
       return;
     }
@@ -202,6 +231,7 @@ class PlaybackController extends ChangeNotifier {
     _firstPreparation = null;
     // 新規取得したURLも、一時停止や回線切替の後は失効し得るため1回だけ更新する。
     _canRefreshCurrent = usesApi && !refresh;
+    _currentWasRefreshed = refresh;
     _playbackFailed = false;
     _pendingAudioError = null;
     _queue.clear();
@@ -216,9 +246,10 @@ class PlaybackController extends ChangeNotifier {
     isPlaying = false;
     position = Duration.zero;
     duration = Duration.zero;
-    error = null;
+    _clearError();
     _notify();
     var resolvedMedia = false;
+    var operation = "再生準備（URL取得・プレーヤー停止）";
     try {
       // 両方のFutureに直ちにエラーハンドラーを付ける。終了処理中のAPI失敗も
       // 未処理例外にせず、新プレーヤーは終了処理とURL取得の両方を待って作る。
@@ -241,6 +272,7 @@ class PlaybackController extends ChangeNotifier {
       _pendingAudioError = null;
       _notify();
       if (requestedMode == PlaybackMode.audio) {
+        operation = "音声の読み込み";
         final entry = QueueEntry(
           track: track,
           uri: uri,
@@ -256,13 +288,17 @@ class PlaybackController extends ChangeNotifier {
         _playAudio(generation);
         if (!isDirect) unawaited(_fillQueue(generation));
       } else {
+        operation = "動画の読み込み";
         final video = _videoFactory(uri, media.httpHeaders);
         _video = video;
         await measureStartup('player_load', video.initialize);
         if (!_isCurrent(generation) || _video != video) return;
         video.addListener(_onVideoChanged);
         _onVideoChanged();
-        if (_videoForeground) await video.play();
+        if (_videoForeground) {
+          operation = "動画の再生";
+          await video.play();
+        }
       }
     } catch (failure) {
       if (_isCurrent(generation)) {
@@ -276,10 +312,16 @@ class PlaybackController extends ChangeNotifier {
           return;
         }
         _startupProgress = null;
-        error =
+        final message =
             failure is ApiFailure
                 ? failure.message
                 : "メディアを再生できません。曲を選び直すか、接続状態を確認してください。";
+        _recordError(
+          message,
+          operation: operation,
+          failure: failure,
+          refreshed: refresh,
+        );
         _playbackFailed = true;
         if (usesApi) mix.api.invalidateStream(track.videoId);
         isPlaying = false;
@@ -322,9 +364,10 @@ class PlaybackController extends ChangeNotifier {
     duration = track.duration ?? Duration.zero;
     _completedGeneration = null;
     _canRefreshCurrent = true;
+    _currentWasRefreshed = false;
     _playbackFailed = false;
     _pendingAudioError = null;
-    error = null;
+    _clearError();
     _notify();
     try {
       final prepared = preparation == null || await preparation;
@@ -364,10 +407,11 @@ class PlaybackController extends ChangeNotifier {
     if (pendingError != null && !_playbackFailed) _onAudioError(pendingError);
   }
 
-  void _onAudioError(String value) {
+  void _onAudioError(MediaFailure failure) {
+    if (_playbackFailed) return;
     if (mode != PlaybackMode.audio || currentTrack == null) return;
     if (isBusy) {
-      _pendingAudioError = value;
+      _pendingAudioError = failure;
       return;
     }
     if (_canRefreshCurrent && !isDirect && currentIndex != null) {
@@ -375,7 +419,7 @@ class PlaybackController extends ChangeNotifier {
       unawaited(_startTrack(currentTrack!, currentIndex!, refresh: true));
       return;
     }
-    error = value;
+    _recordError(failure.message, operation: "音声の再生", failure: failure);
     _playbackFailed = true;
     if (!isDirect) mix.api.invalidateStream(currentTrack!.videoId);
     isPlaying = false;
@@ -386,9 +430,14 @@ class PlaybackController extends ChangeNotifier {
     if (!_isCurrent(generation)) return;
     final selection = _selection;
     unawaited(
-      _audio.play().catchError((Object _) {
+      _audio.play().catchError((Object failure) {
         if (_isSelectionCurrent(generation, selection)) {
-          _onAudioError('音声を再生できません。曲を選び直して再度お試しください。');
+          _onAudioError(
+            MediaFailure(
+              "音声を再生できません。曲を選び直して再度お試しください。",
+              details: FailureDetails.fromException(failure),
+            ),
+          );
         }
       }),
     );
@@ -437,9 +486,13 @@ class PlaybackController extends ChangeNotifier {
             }
           });
           _notify();
-        } catch (_) {
+        } catch (failure) {
           if (!_isCurrent(generation)) return;
-          error = '先読みできなかった曲をスキップしました。現在の曲の再生は続きます。';
+          _recordError(
+            "先読みできなかった曲をスキップしました。現在の曲の再生は続きます。",
+            operation: "次の曲の先読み",
+            failure: failure,
+          );
           _notify();
         }
       }
@@ -570,6 +623,7 @@ class PlaybackController extends ChangeNotifier {
     if (changed) {
       _completedGeneration = null;
       _canRefreshCurrent = true;
+      _currentWasRefreshed = false;
     }
     _notify();
     if (changed && !isDirect) unawaited(_fillQueue(_generation));
@@ -599,8 +653,18 @@ class PlaybackController extends ChangeNotifier {
     isPlaying = value.playing;
     _recordFirstProgress();
     if (value.hasError) {
+      // 同じエラーの位置通知で、最初に記録した発生時刻を上書きしない。
+      if (!_playbackFailed) {
+        _recordError(
+          "動画を再生できません。曲を選び直して再度お試しください。",
+          operation: "動画の再生",
+          failure: MediaFailure(
+            "動画の再生エラー",
+            details: value.failure ?? const FailureDetails(type: "VideoError"),
+          ),
+        );
+      }
       _playbackFailed = true;
-      error = '動画を再生できません。曲を選び直して再度お試しください。';
     }
     _notify();
     if (value.completed &&
@@ -645,8 +709,12 @@ class PlaybackController extends ChangeNotifier {
         }
         await _video?.play();
       }
-    } catch (_) {
-      error = '再生操作に失敗しました。曲を選び直してください。';
+    } catch (failure) {
+      _recordError(
+        "再生操作に失敗しました。曲を選び直してください。",
+        operation: "再生・一時停止の操作",
+        failure: failure,
+      );
       _notify();
     }
   }
@@ -715,9 +783,9 @@ class PlaybackController extends ChangeNotifier {
           if (isCurrent()) _onVideoChanged();
         }
       }
-    } catch (_) {
+    } catch (failure) {
       if (isCurrent()) {
-        error = '再生位置を変更できません。';
+        _recordError("再生位置を変更できません。", operation: "再生位置の変更", failure: failure);
         _notify();
       }
     }
@@ -736,8 +804,12 @@ class PlaybackController extends ChangeNotifier {
     if (mode != PlaybackMode.video) return;
     try {
       await _video?.pause();
-    } catch (_) {
-      error = '動画の一時停止に失敗しました。';
+    } catch (failure) {
+      _recordError(
+        "動画の一時停止に失敗しました。",
+        operation: "バックグラウンド移行時の一時停止",
+        failure: failure,
+      );
       _notify();
     }
   }
@@ -767,6 +839,7 @@ class PlaybackController extends ChangeNotifier {
     _firstPreparation = null;
     _pendingAudioError = null;
     _canRefreshCurrent = false;
+    _currentWasRefreshed = false;
     _playbackFailed = false;
     _queue.clear();
     currentTrack = null;
@@ -777,14 +850,18 @@ class PlaybackController extends ChangeNotifier {
     isResolvingUrl = false;
     position = Duration.zero;
     duration = Duration.zero;
-    error = null;
+    _clearError();
     _notify();
     try {
       await _releaseVideo();
       await _mutateAudio(generation, _audio.stop);
-    } catch (_) {
+    } catch (failure) {
       if (_isCurrent(generation)) {
-        error = 'プレーヤーの停止に失敗しました。';
+        _recordError(
+          "プレーヤーの停止に失敗しました。",
+          operation: "プレーヤーの停止",
+          failure: failure,
+        );
         _notify();
       }
     }
@@ -793,6 +870,7 @@ class PlaybackController extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _uptime.stop();
     _generation++;
     _startupProgress = null;
     mix.removeListener(_onMixChanged);

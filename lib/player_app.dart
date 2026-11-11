@@ -11,8 +11,10 @@ import 'models/api_timing.dart';
 import 'screens/youtube_cookies_screen.dart';
 import 'services/api_client.dart';
 import 'services/app_settings.dart';
+import "services/error_report.dart";
 import 'services/playback_engines.dart';
 import 'services/youtube_cookie_source.dart';
+import "widgets/error_copy_button.dart";
 
 typedef ApiClientFactory = ApiClient Function(String url, String key);
 const _accent = Color(0xFF80E5CE);
@@ -103,6 +105,7 @@ class _PlayerScreenState extends State<_PlayerScreen>
   SettingsSnapshot _settings = const SettingsSnapshot();
   bool _initializing = true;
   String? _settingsError;
+  ErrorReport? _settingsErrorReport;
 
   @override
   void initState() {
@@ -124,11 +127,24 @@ class _PlayerScreenState extends State<_PlayerScreen>
       if (settings.serverUrl.isNotEmpty) {
         _mix.configure(widget.apiFactory(settings.serverUrl, settings.apiKey));
       }
-    } catch (_) {
-      _settingsError = '設定を読み込めませんでした。API サーバー設定を確認してください。';
+    } catch (failure) {
+      _recordSettingsError(
+        "設定を読み込めませんでした。API サーバー設定を確認してください。",
+        "設定の読み込み",
+        failure,
+      );
     } finally {
       if (mounted) setState(() => _initializing = false);
     }
+  }
+
+  void _recordSettingsError(String message, String operation, Object failure) {
+    _settingsError = message;
+    _settingsErrorReport = ErrorReport.capture(
+      operation: operation,
+      message: message,
+      failure: failure,
+    );
   }
 
   @override
@@ -161,6 +177,7 @@ class _PlayerScreenState extends State<_PlayerScreen>
                   lastMix: _url.text,
                 );
                 _settingsError = null;
+                _settingsErrorReport = null;
               });
             },
           ),
@@ -198,8 +215,16 @@ class _PlayerScreenState extends State<_PlayerScreen>
       _playback.prepareFirstTrack();
       try {
         await widget.settings.saveLastMix(_url.text.trim());
-      } catch (_) {
-        if (mounted) setState(() => _settingsError = 'Mix URL を保存できませんでした。');
+      } catch (failure) {
+        if (mounted) {
+          setState(
+            () => _recordSettingsError(
+              "Mix URL を保存できませんでした。",
+              "Mix URLの保存",
+              failure,
+            ),
+          );
+        }
       }
     }
   }
@@ -332,18 +357,21 @@ class _PlayerScreenState extends State<_PlayerScreen>
                           _Notice(
                             icon: Icons.info_outline,
                             text: _settingsError!,
+                            action: _errorCopyButton(_settingsErrorReport),
                           ),
                         if (_mix.error != null)
                           _Notice(
                             icon: Icons.error_outline,
                             text: _mix.error!,
                             isError: true,
+                            action: _errorCopyButton(_mix.errorReport),
                           ),
                         if (_playback.error != null)
                           _Notice(
                             icon: Icons.error_outline,
                             text: _playback.error!,
                             isError: true,
+                            action: _errorCopyButton(_playback.errorReport),
                           ),
                         if (_playback.mode == PlaybackMode.video &&
                             video != null)
@@ -476,6 +504,9 @@ class _PlayerScreenState extends State<_PlayerScreen>
       );
     },
   );
+
+  Widget? _errorCopyButton(ErrorReport? report) =>
+      report == null ? null : ErrorCopyButton(report: report);
 
   Widget _sourceCard() => Container(
     padding: const EdgeInsets.all(18),
@@ -974,6 +1005,7 @@ class _ConnectionDialogState extends State<_ConnectionDialog> {
   late final _key = TextEditingController(text: widget.initial.apiKey);
   bool _saving = false;
   String? _error;
+  ErrorReport? _errorReport;
   bool get _canUseYoutube =>
       !_saving &&
       widget.api?.hasApiKey == true &&
@@ -991,15 +1023,21 @@ class _ConnectionDialogState extends State<_ConnectionDialog> {
     setState(() {
       _saving = true;
       _error = null;
+      _errorReport = null;
     });
     try {
       await widget.onSave(_server.text.trim(), _key.text.trim());
       if (mounted) Navigator.pop(context);
-    } catch (_) {
+    } catch (failure) {
       if (mounted) {
         setState(() {
           _saving = false;
-          _error = '設定を保存できませんでした。安全なストレージが利用可能か確認してください。';
+          _error = "設定を保存できませんでした。安全なストレージが利用可能か確認してください。";
+          _errorReport = ErrorReport.capture(
+            operation: "設定の保存",
+            message: _error!,
+            failure: failure,
+          );
         });
       }
     }
@@ -1107,7 +1145,15 @@ class _ConnectionDialogState extends State<_ConnectionDialog> {
                 if (_error != null)
                   Padding(
                     padding: const EdgeInsets.only(top: 14),
-                    child: Text(_error!, style: const TextStyle(fontSize: 12)),
+                    child: _Notice(
+                      icon: Icons.error_outline,
+                      text: _error!,
+                      isError: true,
+                      action:
+                          _errorReport == null
+                              ? null
+                              : ErrorCopyButton(report: _errorReport!),
+                    ),
                   ),
               ],
             ),

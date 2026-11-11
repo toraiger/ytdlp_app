@@ -85,6 +85,9 @@ void main() {
       final mix =
           MixController()..configure(
             mockApi((request) {
+              if (request.url.path == "/stream") {
+                return jsonResponse(streamJson("diagnostic-check"));
+              }
               if (request.url.path.endsWith('extend')) {
                 calls++;
                 return extension.future;
@@ -100,6 +103,14 @@ void main() {
       expect(await first, 0);
       expect(calls, 1);
       expect(mix.error, contains('404'));
+      final report = mix.errorReport!;
+      expect(report.operation, "曲の追加取得");
+      expect(report.details.httpStatusCode, 404);
+      expect(report.apiTiming!.statusCode, 404);
+      // 後続の先読みでAPI計測値が更新されても、失敗した通信の情報は維持する。
+      await mix.api.resolveStream("diagnostic-check");
+      expect(report.apiTiming!.statusCode, 404);
+      expect(mix.errorReport, same(report));
     },
   );
 }

@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:mix_player_app/services/api_client.dart';
 import 'package:mix_player_app/services/app_settings.dart';
+import "package:mix_player_app/services/error_report.dart";
 import 'package:mix_player_app/services/playback_engines.dart';
 import 'package:video_player/video_player.dart';
 
@@ -75,7 +76,7 @@ class FakeAudioEngine implements AudioEngine {
   final positionEvents = StreamController<Duration>.broadcast(sync: true);
   final durationEvents = StreamController<Duration?>.broadcast(sync: true);
   final indexEvents = StreamController<int?>.broadcast(sync: true);
-  final errorEvents = StreamController<String>.broadcast(sync: true);
+  final errorEvents = StreamController<MediaFailure>.broadcast(sync: true);
   final entries = <QueueEntry>[];
   int loadCount = 0;
   int stopCount = 0;
@@ -101,7 +102,17 @@ class FakeAudioEngine implements AudioEngine {
   @override
   Stream<int?> get indexes => indexEvents.stream;
   @override
-  Stream<String> get errors => errorEvents.stream;
+  Stream<MediaFailure> get errors => errorEvents.stream;
+
+  void emitError(String message, {FailureDetails? details}) {
+    errorEvents.add(
+      MediaFailure(
+        message,
+        details: details ?? const FailureDetails(type: "AudioError"),
+      ),
+    );
+  }
+
   @override
   Future<void> load(QueueEntry entry) async {
     loadCount++;
