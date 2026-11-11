@@ -5,7 +5,9 @@ import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 
 import '../controllers/playback_controller.dart';
+import "../controllers/mix_controller.dart";
 import '../controllers/youtube_playback_controller.dart';
+import "../models/mix_queue_item.dart";
 import '../models/youtube_video_page.dart';
 import '../widgets/youtube_webview.dart';
 
@@ -35,6 +37,92 @@ class _YoutubeBrowserScreenState extends State<YoutubeBrowserScreen>
   bool _canForward = false;
   bool _browserFailed = false;
   int _historyRevision = 0;
+  bool _menuOpen = false;
+
+  Future<void> _showVideoMenu(YoutubeVideoTarget target) async {
+    if (!mounted || _menuOpen) return;
+    _menuOpen = true;
+    QueueInsertPosition? placement;
+    try {
+      placement = await showModalBottomSheet<QueueInsertPosition>(
+        context: context,
+        useSafeArea: true,
+        builder:
+            (sheetContext) => AnimatedBuilder(
+              animation: Listenable.merge([widget.controller, widget.playback]),
+              builder:
+                  (context, child) => SafeArea(
+                    top: false,
+                    child: SingleChildScrollView(
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          ListTile(
+                            title: Text(
+                              target.title ?? target.page.videoId,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          for (final position in QueueInsertPosition.values)
+                            ListTile(
+                              leading: Icon(
+                                position == QueueInsertPosition.next
+                                    ? Icons.playlist_play
+                                    : Icons.playlist_add,
+                              ),
+                              title: Text(
+                                position == QueueInsertPosition.next
+                                    ? "次に再生"
+                                    : "キューの最後に追加",
+                              ),
+                              enabled: widget.controller.canAddToQueue,
+                              onTap:
+                                  widget.controller.canAddToQueue
+                                      ? () =>
+                                          Navigator.pop(sheetContext, position)
+                                      : null,
+                            ),
+                          if (!widget.controller.canAddToQueue)
+                            const ListTile(
+                              title: Text("再生の準備・Mixの取得中や、直接URLの再生中は追加できません。"),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
+            ),
+      );
+    } finally {
+      _menuOpen = false;
+    }
+    if (!mounted || placement == null) return;
+    try {
+      final added = await widget.controller.addToQueue(target, placement);
+      if (mounted && added) _showAdditionMessage("キューに追加しました。");
+    } catch (failure) {
+      if (mounted) _showAdditionMessage(describeFailure(failure));
+    }
+  }
+
+  void _showAdditionMessage(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  void _showCurrentVideoMenu() {
+    final track = widget.playback.currentTrack;
+    if (track == null || !YoutubeVideoPage.isVideoId(track.videoId)) return;
+    unawaited(
+      _showVideoMenu(
+        YoutubeVideoTarget(
+          page: YoutubeVideoPage(videoId: track.videoId),
+          title: track.title,
+        ),
+      ),
+    );
+  }
 
   @override
   void initState() {
@@ -110,6 +198,7 @@ class _YoutubeBrowserScreenState extends State<YoutubeBrowserScreen>
   @override
   Widget build(BuildContext context) {
     final callbacks = YoutubeBrowserCallbacks(
+      onVideoLongPress: (target) => unawaited(_showVideoMenu(target)),
       onCreated: (browser) {
         if (!mounted) return;
         setState(() => _browser = browser);
@@ -267,27 +356,30 @@ class _YoutubeBrowserScreenState extends State<YoutubeBrowserScreen>
                         (context, constraints) => Column(
                           children: [
                             if (video != null)
-                              SizedBox(
-                                height: math.min(
-                                  constraints.maxHeight * .4,
-                                  210,
-                                ),
-                                width: double.infinity,
-                                child: ColoredBox(
-                                  color: Colors.black,
-                                  child: Center(
-                                    child: AspectRatio(
-                                      aspectRatio:
-                                          video.value.isInitialized
-                                              ? video.value.aspectRatio
-                                              : 16 / 9,
-                                      child:
-                                          video.value.isInitialized
-                                              ? VideoPlayer(video)
-                                              : const Center(
-                                                child:
-                                                    CircularProgressIndicator(),
-                                              ),
+                              GestureDetector(
+                                onLongPress: _showCurrentVideoMenu,
+                                child: SizedBox(
+                                  height: math.min(
+                                    constraints.maxHeight * .4,
+                                    210,
+                                  ),
+                                  width: double.infinity,
+                                  child: ColoredBox(
+                                    color: Colors.black,
+                                    child: Center(
+                                      child: AspectRatio(
+                                        aspectRatio:
+                                            video.value.isInitialized
+                                                ? video.value.aspectRatio
+                                                : 16 / 9,
+                                        child:
+                                            video.value.isInitialized
+                                                ? VideoPlayer(video)
+                                                : const Center(
+                                                  child:
+                                                      CircularProgressIndicator(),
+                                                ),
+                                      ),
                                     ),
                                   ),
                                 ),

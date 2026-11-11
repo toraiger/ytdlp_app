@@ -53,15 +53,20 @@ void main() {
     mix.dispose();
     await drain();
   });
+  String entryIdFor(String videoId) =>
+      mix.queueItems
+          .firstWhere((item) => item.track.videoId == videoId)
+          .entryId;
+
   List<String> ids() => mix.items.map((e) => e.videoId).toList();
 
   test(
     'Move uses stable IDs and preserves edits when append includes duplicates',
     () async {
       final revision = mix.revision;
-      expect(mix.moveTrack('c', 0), isTrue);
+      expect(mix.moveTrack(entryIdFor("c"), 0), isTrue);
       expect(ids(), ['c', 'a', 'b', 'd', 'e']);
-      final removed = mix.removeTrack('a')!;
+      final removed = mix.removeTrack(entryIdFor("a"))!;
       await mix.extend();
       expect(ids(), ['c', 'b', 'd', 'e']);
       expect(mix.revision, revision);
@@ -73,8 +78,8 @@ void main() {
   test(
     'New successful Mix resets exclusions, failed reload retains edits and invalidates undo',
     () async {
-      final removed = mix.removeTrack('b')!;
-      mix.moveTrack('e', 0);
+      final removed = mix.removeTrack(entryIdFor("b"))!;
+      mix.moveTrack(entryIdFor("e"), 0);
       override = (_) => http.Response('', 503);
       expect(await mix.load(defaultMixUrl), isFalse);
       expect(ids(), ['e', 'a', 'c', 'd']);
@@ -96,8 +101,8 @@ void main() {
                   ? response.future
                   : jsonResponse(streamJson('a'));
       final extending = mix.extend();
-      mix.removeTrack('b');
-      mix.moveTrack('d', 0);
+      mix.removeTrack(entryIdFor("b"));
+      mix.moveTrack(entryIdFor("d"), 0);
       response.complete(jsonResponse(mixJson(['a', 'b', 'c', 'd', 'e', 'f'])));
       await extending;
       expect(ids(), ['d', 'a', 'c', 'e', 'f']);
@@ -111,7 +116,7 @@ void main() {
       final pending = mix.extend();
       RemovedMixTrack? removed;
       for (final id in ids()) {
-        removed = mix.removeTrack(id);
+        removed = mix.removeTrack(entryIdFor(id));
       }
       response.complete(jsonResponse(mixJson(['a', 'b', 'f'])));
       await pending;
@@ -131,7 +136,7 @@ void main() {
       await drain();
       audio.positionEvents.add(const Duration(seconds: 30));
       final loads = audio.loadCount;
-      mix.moveTrack('c', 1);
+      mix.moveTrack(entryIdFor("c"), 1);
       await drain();
       expect(audio.entries.map((e) => e.track.videoId), ['a', 'c', 'b']);
       expect(player.currentTrack?.videoId, 'a');
@@ -168,7 +173,7 @@ void main() {
         const Duration(milliseconds: 237125),
       );
       final loads = audio.loadCount;
-      mix.moveTrack('c', 1);
+      mix.moveTrack(entryIdFor("c"), 1);
       await drain();
       expect(
         player.diagnostics.apiDuration,
@@ -184,7 +189,7 @@ void main() {
         const Duration(milliseconds: 235250),
       );
       expect(player.diagnostics.formatId, '141');
-      final removed = mix.removeTrack('b')!;
+      final removed = mix.removeTrack(entryIdFor("b"))!;
       await drain();
       mix.restoreTrack(removed);
       await drain();
@@ -206,7 +211,7 @@ void main() {
       await drain();
       audio.positionEvents.add(const Duration(seconds: 35));
       final loads = audio.loadCount;
-      mix.moveTrack('b', 3);
+      mix.moveTrack(entryIdFor("b"), 3);
       await drain();
       expect(player.currentTrack?.videoId, 'b');
       expect(player.currentIndex, 3);
@@ -224,7 +229,7 @@ void main() {
       await drain();
       audio.positionEvents.add(const Duration(seconds: 45));
       final loads = audio.loadCount;
-      mix.removeTrack('b');
+      mix.removeTrack(entryIdFor("b"));
       await drain();
       expect(player.position, const Duration(seconds: 45));
       expect(audio.loadCount, loads);
@@ -239,7 +244,7 @@ void main() {
     () async {
       await player.playTrack(1);
       await drain();
-      final removed = mix.removeTrack('b')!;
+      final removed = mix.removeTrack(entryIdFor("b"))!;
       await drain();
       expect(player.currentTrack?.videoId, 'c');
       expect(player.isPlaying, isTrue);
@@ -256,7 +261,7 @@ void main() {
       await player.playTrack(1);
       await drain();
       await player.togglePlay();
-      mix.removeTrack('b');
+      mix.removeTrack(entryIdFor("b"));
       await drain();
       expect(player.currentTrack?.videoId, 'c');
       expect(audio.playing, isFalse);
@@ -268,7 +273,7 @@ void main() {
     () async {
       await player.playTrack(4);
       await drain();
-      mix.removeTrack('e');
+      mix.removeTrack(entryIdFor("e"));
       await drain();
       expect(player.currentTrack, isNull);
       expect(audio.playing, isFalse);
@@ -287,7 +292,7 @@ void main() {
                   );
       await player.playTrack(0);
       await drain();
-      mix.removeTrack('b');
+      mix.removeTrack(entryIdFor("b"));
       await drain();
       response.complete(jsonResponse(streamJson('b')));
       await drain();
@@ -310,7 +315,7 @@ void main() {
                   );
       await mix.load(defaultMixUrl);
       await drain();
-      mix.moveTrack('b', 0);
+      mix.moveTrack(entryIdFor("b"), 0);
       await drain();
       response.complete(jsonResponse(streamJson('a')));
       await drain();
@@ -334,13 +339,13 @@ void main() {
         ),
       );
       final old = videos.single;
-      mix.moveTrack('b', 2);
+      mix.moveTrack(entryIdFor("b"), 2);
       await drain();
       expect(videos, hasLength(1));
       expect(old.disposed, isFalse);
       expect(player.position, const Duration(seconds: 20));
       await player.togglePlay();
-      mix.removeTrack('b');
+      mix.removeTrack(entryIdFor("b"));
       await drain();
       expect(player.currentTrack?.videoId, 'd');
       expect(videos.last.value.playing, isFalse);
@@ -349,8 +354,8 @@ void main() {
   test('Editing a Mix leaves a standalone YouTube video untouched', () async {
     await player.playYoutubeVideo('aaaaaaaaaaa');
     final loads = audio.loadCount;
-    mix.moveTrack('b', 0);
-    mix.removeTrack('a');
+    mix.moveTrack(entryIdFor("b"), 0);
+    mix.removeTrack(entryIdFor("a"));
     await drain();
     expect(player.currentTrack?.videoId, 'aaaaaaaaaaa');
     expect(audio.loadCount, loads);
@@ -362,7 +367,7 @@ void main() {
         (entry) => entry.track.videoId == 'b' ? appended.future : null;
     await player.playTrack(0);
     await drain();
-    mix.removeTrack('b');
+    mix.removeTrack(entryIdFor("b"));
     appended.complete();
     await drain();
     expect(audio.entries.map((e) => e.track.videoId), ['a', 'c', 'd']);
@@ -376,7 +381,7 @@ void main() {
       audio.onRemove = (_) {
         audio.stateEvents.add(const AudioStatus(false, AudioPhase.completed));
       };
-      mix.removeTrack('b');
+      mix.removeTrack(entryIdFor("b"));
       await drain();
       expect(player.currentTrack?.videoId, 'c');
       expect(player.isPlaying, isTrue);
@@ -389,7 +394,7 @@ void main() {
       await drain();
       final removed = Completer<void>();
       audio.onRemove = (_) => removed.future;
-      mix.removeTrack('b');
+      mix.removeTrack(entryIdFor("b"));
       await drain();
       final selected = player.playTrack(2);
       removed.complete();
@@ -407,7 +412,7 @@ void main() {
       await drain();
       final removed = Completer<void>();
       audio.onRemove = (_) => removed.future;
-      mix.removeTrack('c');
+      mix.removeTrack(entryIdFor("c"));
       await drain();
       final next = player.next();
       removed.complete();
@@ -423,7 +428,7 @@ void main() {
       await player.playTrack(0);
       await drain();
       audio.onRemove = (_) => throw StateError('native failure');
-      mix.removeTrack('b');
+      mix.removeTrack(entryIdFor("b"));
       await drain();
       expect(player.currentTrack, isNull);
       expect(player.error, contains('更新できません'));
@@ -447,7 +452,7 @@ void main() {
                   );
       await player.playTrack(1);
       await player.togglePlay();
-      final removed = mix.removeTrack('b')!;
+      final removed = mix.removeTrack(entryIdFor("b"))!;
       await drain();
       expect(player.isBusy, isTrue);
       mix.restoreTrack(removed);
@@ -472,9 +477,9 @@ void main() {
           await gate.future;
         }
       };
-      mix.removeTrack('b');
+      mix.removeTrack(entryIdFor("b"));
       await drain();
-      mix.moveTrack('d', 1);
+      mix.moveTrack(entryIdFor("d"), 1);
       gate.complete();
       await drain();
       expect(player.currentTrack?.videoId, 'd');

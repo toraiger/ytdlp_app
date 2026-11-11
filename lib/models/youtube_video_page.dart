@@ -59,3 +59,26 @@ class YoutubeVideoPage {
     );
   }
 }
+
+/// Display metadata from the long-pressed element; only the validated page is
+/// used to resolve media. A playlist parameter never queues the entire Mix.
+class YoutubeVideoTarget {
+  const YoutubeVideoTarget({required this.page, this.title});
+
+  final YoutubeVideoPage page;
+  final String? title;
+
+  static YoutubeVideoTarget? fromMessage(Object? message) {
+    if (message is! Map) return null;
+    final url = message["url"];
+    if (url is! String) return null;
+    final uri = Uri.tryParse(url);
+    final page = uri == null ? null : YoutubeVideoPage.fromUri(uri);
+    if (page == null) return null;
+    final title = message["title"];
+    return YoutubeVideoTarget(
+      page: YoutubeVideoPage(videoId: page.videoId),
+      title: (title is String && title.trim().isNotEmpty) ? title.trim() : null,
+    );
+  }
+}

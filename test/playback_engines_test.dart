@@ -5,6 +5,20 @@ import 'package:mix_player_app/models/api_models.dart';
 import 'package:mix_player_app/services/playback_engines.dart';
 
 void main() {
+  test("Repeated media uses distinct native queue identities", () {
+    const track = MixTrack(videoId: "same-video", title: "Same video");
+    final uri = Uri.parse("https://media.example.test/same.m4a");
+    final identifiers = ["first-occurrence", "second-occurrence"];
+    final sources =
+        identifiers
+            .map(
+              (entryId) => createAudioSource(
+                QueueEntry(track: track, entryId: entryId, uri: uri),
+              ),
+            )
+            .cast<ProgressiveAudioSource>();
+    expect(sources.map((source) => (source.tag as MediaItem).id), identifiers);
+  });
   test(
     'Audio VOD requests precise Apple timing and preserves media metadata',
     () {

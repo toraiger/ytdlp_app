@@ -1,11 +1,13 @@
 import 'package:flutter/foundation.dart';
 
 import '../models/api_models.dart';
+import "../models/mix_queue_item.dart";
 import '../services/api_client.dart';
 
 class RemovedMixTrack {
-  const RemovedMixTrack(this.track, this.index, this.revision);
-  final MixTrack track;
+  const RemovedMixTrack(this.item, this.index, this.revision);
+  final MixQueueItem item;
+  MixTrack get track => item.track;
   final int index;
   final int revision;
 }
@@ -13,11 +15,12 @@ class RemovedMixTrack {
 class MixController extends ChangeNotifier {
   ApiClient? _api;
   MixResponse? _session;
-  List<MixTrack> _items = [];
+  List<MixQueueItem> _items = [];
+  int _nextEntryId = 0;
   int _generation = 0;
   int editRevision = 0;
   int _extensionRevision = 0;
-  final _removedIds = <String>{};
+  final _removedIds = <String, String>{};
   RemovedMixTrack? _lastRemoved;
   bool _disposed = false;
   bool prepareFirstTrackOnLoad = true;
@@ -26,9 +29,12 @@ class MixController extends ChangeNotifier {
   String? error;
   int? lastExtensionAdded;
 
-  List<MixTrack> get items => List.unmodifiable(_items);
+  List<MixTrack> get items =>
+      List.unmodifiable(_items.map((item) => item.track));
+  List<MixQueueItem> get queueItems => List.unmodifiable(_items);
   String? get sessionId => _session?.sessionId;
-  String get title => _session?.playlistTitle ?? 'Your Mix';
+  String get title => _session?.playlistTitle ?? "再生キュー";
+  bool get canExtend => _session != null;
   DateTime? get expiresAt => _session?.expiresAt;
   bool get isConfigured => _api != null;
 
@@ -93,12 +99,16 @@ class MixController extends ChangeNotifier {
         throw const ApiFailure('Mix に曲がありません。別の Mix URL をお試しください。');
       }
       _session = result;
-      _items = mergeTracks([], result.items);
+      _items =
+          mergeTracks(
+            [],
+            result.items,
+          ).map((track) => _createItem(track, QueueItemSource.mix)).toList();
       _removedIds.clear();
       _lastRemoved = null;
       return true;
-    } catch (e) {
-      if (_isCurrent(generation)) error = describeFailure(e);
+    } catch (failure) {
+      if (_isCurrent(generation)) error = describeFailure(failure);
       return false;
     } finally {
       if (_isCurrent(generation)) {
@@ -119,18 +129,22 @@ class MixController extends ChangeNotifier {
     try {
       final result = await api.extendMix(session.sessionId);
       if (!_isCurrent(generation) || extension != _extensionRevision) return 0;
-      final merged = mergeTracks(
-        _items,
-        result.items.where((track) => !_removedIds.contains(track.videoId)),
-      );
-      final added = merged.length - _items.length;
-      _items = merged;
+      // Deduplicate incoming Mix results without collapsing manual repeats.
+      final seen = _items.map((item) => item.track.videoId).toSet();
+      final additions =
+          result.items
+              .where((track) => !_removedIds.containsValue(track.videoId))
+              .where((track) => seen.add(track.videoId))
+              .map((track) => _createItem(track, QueueItemSource.mix))
+              .toList();
+      final added = additions.length;
+      _items.addAll(additions);
       _session = result;
       lastExtensionAdded = added;
       return added;
-    } catch (e) {
+    } catch (failure) {
       if (_isCurrent(generation) && extension == _extensionRevision) {
-        error = describeFailure(e);
+        error = describeFailure(failure);
       }
       return 0;
     } finally {
@@ -141,9 +155,42 @@ class MixController extends ChangeNotifier {
     }
   }
 
-  bool moveTrack(String videoId, int toIndex) {
+  MixQueueItem _createItem(MixTrack track, QueueItemSource source) =>
+      MixQueueItem(
+        entryId: "queue-${++_nextEntryId}",
+        track: track,
+        source: source,
+      );
+
+  /// Called while the player still owns its standalone source. Its listener
+  /// ignores this edit until PlaybackController attaches that source below.
+  MixQueueItem createManualQueue(MixTrack anchor) {
+    final item = _createItem(anchor, QueueItemSource.manual);
+    _session = null;
+    _items = [item];
+    _extensionRevision++;
+    isExtending = false;
+    lastExtensionAdded = null;
+    prepareFirstTrackOnLoad = false;
+    _removedIds.clear();
+    _lastRemoved = null;
+    editRevision++;
+    notifyListeners();
+    return item;
+  }
+
+  MixQueueItem insertTrack(MixTrack track, int index) {
+    if (isLoading) throw const ApiFailure("Mixの読み込み完了後に追加してください。");
+    final item = _createItem(track, QueueItemSource.manual);
+    _items.insert(index.clamp(0, _items.length), item);
+    editRevision++;
+    notifyListeners();
+    return item;
+  }
+
+  bool moveTrack(String entryId, int toIndex) {
     if (isLoading) return false;
-    final from = _items.indexWhere((track) => track.videoId == videoId);
+    final from = _items.indexWhere((item) => item.entryId == entryId);
     if (from < 0 ||
         toIndex < 0 ||
         toIndex >= _items.length ||
@@ -157,12 +204,12 @@ class MixController extends ChangeNotifier {
     return true;
   }
 
-  RemovedMixTrack? removeTrack(String videoId) {
+  RemovedMixTrack? removeTrack(String entryId) {
     if (isLoading) return null;
-    final index = _items.indexWhere((track) => track.videoId == videoId);
+    final index = _items.indexWhere((item) => item.entryId == entryId);
     if (index < 0) return null;
     final removed = RemovedMixTrack(_items.removeAt(index), index, revision);
-    _removedIds.add(videoId);
+    _removedIds[removed.item.entryId] = removed.track.videoId;
     _lastRemoved = removed;
     if (_items.isEmpty) {
       // Do not repopulate an emptied list from an already pending extension.
@@ -181,8 +228,8 @@ class MixController extends ChangeNotifier {
       return false;
     }
     _lastRemoved = null;
-    _removedIds.remove(removed.track.videoId);
-    _items.insert(removed.index.clamp(0, _items.length), removed.track);
+    _removedIds.remove(removed.item.entryId);
+    _items.insert(removed.index.clamp(0, _items.length), removed.item);
     editRevision++;
     notifyListeners();
     return true;

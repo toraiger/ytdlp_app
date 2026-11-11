@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:mix_player_app/player_app.dart';
 import 'package:mix_player_app/services/app_settings.dart';
 import 'package:mix_player_app/widgets/youtube_webview.dart';
+import "package:mix_player_app/models/youtube_video_page.dart";
 
 import 'support/fakes.dart';
 import 'youtube_playback_controller_test.dart' show a, b, c, d, videoPage;
@@ -143,6 +144,101 @@ void main() {
     );
     expect(tester.widget<OutlinedButton>(button).onPressed, isNull);
   });
+
+  testWidgets(
+    "Long press opens one cancellable menu without navigation or API requests",
+    (tester) async {
+      await launch(tester);
+      await open(tester);
+      final target = YoutubeVideoTarget(
+        page: YoutubeVideoPage(videoId: b),
+        title: "Long pressed video",
+      );
+      browser.callbacks.onVideoLongPress!(target);
+      browser.callbacks.onVideoLongPress!(target);
+      await tester.pumpAndSettle();
+      expect(find.text("Long pressed video"), findsOneWidget);
+      expect(find.text("次に再生"), findsOneWidget);
+      expect(find.text("キューの最後に追加"), findsOneWidget);
+      expect(requests, isEmpty);
+      expect(browser.loads, isEmpty);
+      await tester.tapAt(const Offset(20, 100));
+      await tester.pumpAndSettle();
+      expect(find.text("次に再生"), findsNothing);
+      expect(requests, isEmpty);
+      expect(audio.playing, isFalse);
+    },
+  );
+
+  for (final action in ["次に再生", "キューの最後に追加"]) {
+    testWidgets("Long press $action adds a repeated video and keeps playback", (
+      tester,
+    ) async {
+      await launch(tester);
+      await open(tester);
+      browser.commit(videoPage(a, list: "RD$a"));
+      await tester.pumpAndSettle();
+      final loadCount = audio.loadCount;
+      final currentPage = browser.current.value;
+      browser.callbacks.onVideoLongPress!(
+        YoutubeVideoTarget(
+          page: YoutubeVideoPage(videoId: a),
+          title: "Repeated video",
+        ),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text(action));
+      await tester.pumpAndSettle();
+      expect(find.text("キューに追加しました。"), findsOneWidget);
+      expect(audio.loadCount, loadCount);
+      expect(audio.playing, isTrue);
+      expect(browser.current.value, currentPage);
+      await tester.tap(find.byTooltip("Mix Playerに戻る"));
+      await tester.pumpAndSettle();
+      expect(find.text("5 曲"), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+  }
+
+  testWidgets("Adding from the menu while idle does not start playback", (
+    tester,
+  ) async {
+    await launch(tester);
+    await open(tester);
+    browser.callbacks.onVideoLongPress!(
+      YoutubeVideoTarget(page: YoutubeVideoPage(videoId: b)),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text("次に再生"));
+    await tester.pumpAndSettle();
+    expect(audio.playing, isFalse);
+    expect(browser.loads, isEmpty);
+    expect(find.text("キューに追加しました。"), findsOneWidget);
+    await tester.tap(find.byTooltip("Mix Playerに戻る"));
+    await tester.pumpAndSettle();
+    expect(find.text("1 曲"), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    "Failed menu addition reports failure and keeps the current video",
+    (tester) async {
+      await launch(tester);
+      await open(tester);
+      browser.commit(videoPage(a));
+      await tester.pumpAndSettle();
+      handler = (request) => http.Response("", 503);
+      browser.callbacks.onVideoLongPress!(
+        YoutubeVideoTarget(page: YoutubeVideoPage(videoId: b)),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text("キューの最後に追加"));
+      await tester.pumpAndSettle();
+      expect(find.textContaining("HTTP 503"), findsOneWidget);
+      expect(audio.playing, isTrue);
+      expect(browser.current.value, videoPage(a));
+    },
+  );
 
   testWidgets(
     'Opening pages precedes API playback; closing retains the same player',

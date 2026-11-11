@@ -5,6 +5,7 @@ import 'package:just_audio_background/just_audio_background.dart';
 import 'package:video_player/video_player.dart';
 
 import '../models/api_models.dart';
+import "../models/mix_queue_item.dart";
 import '../models/native_playback_timing.dart';
 import 'ios_m4a_audio_source.dart';
 
@@ -32,23 +33,35 @@ class QueueEntry {
   const QueueEntry({
     required this.track,
     required this.uri,
+    this.entryId,
     this.mixIndex,
     this.httpHeaders = const {},
     this.format,
     this.streamDuration,
   });
   final MixTrack track;
+  final String? entryId;
   final Uri uri;
   final int? mixIndex;
   final Map<String, String> httpHeaders;
   final StreamFormat? format;
   final Duration? streamDuration;
+
+  QueueEntry withListItem(MixQueueItem item, int index) => QueueEntry(
+    track: item.track,
+    entryId: item.entryId,
+    uri: uri,
+    mixIndex: index,
+    httpHeaders: httpHeaders,
+    format: format,
+    streamDuration: streamDuration,
+  );
 }
 
 /// Preserve manifest transports even when the signed URL has no file extension.
 AudioSource createAudioSource(QueueEntry entry, {TargetPlatform? platform}) {
   final tag = MediaItem(
-    id: entry.track.videoId,
+    id: entry.entryId ?? entry.track.videoId,
     title: entry.track.title,
     artist: entry.track.channel,
     artUri: entry.track.thumbnail,

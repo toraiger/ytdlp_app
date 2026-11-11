@@ -2,11 +2,13 @@ import 'dart:async';
 import 'dart:collection';
 
 import 'package:flutter/foundation.dart';
+import "package:flutter/gestures.dart";
 import 'package:flutter/widgets.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 import '../models/youtube_video_page.dart';
 import '../services/youtube_media_guard.dart';
+import "../services/youtube_queue_menu_script.dart";
 
 abstract interface class YoutubeBrowserHandle {
   Future<void> load(Uri uri);
@@ -24,12 +26,14 @@ class YoutubeBrowserCallbacks {
     required this.onCommitted,
     required this.onLoading,
     required this.onFailure,
+    this.onVideoLongPress,
   });
   final ValueChanged<YoutubeBrowserHandle> onCreated;
   final ValueChanged<Uri> onStarted;
   final ValueChanged<Uri> onCommitted;
   final ValueChanged<bool> onLoading;
   final VoidCallback onFailure;
+  final ValueChanged<YoutubeVideoTarget>? onVideoLongPress;
 }
 
 typedef YoutubeBrowserBuilder =
@@ -52,9 +56,39 @@ class YoutubeWebView extends StatefulWidget {
 }
 
 class _YoutubeWebViewState extends State<YoutubeWebView> {
+  static const _queueMenuHandler = "mixPlayerQueueMenu";
   bool _loadingDocument = true;
   bool _failed = false;
   int _navigationRevision = 0;
+
+  Future<void> _onVideoLongPress(
+    InAppWebViewController controller,
+    List<dynamic> arguments,
+  ) async {
+    if (_loadingDocument || _failed || arguments.length != 1) return;
+    final message = arguments.single;
+    final target = YoutubeVideoTarget.fromMessage(message);
+    if (target == null || message is! Map) return;
+    final revision = _navigationRevision;
+    try {
+      final current = await controller.getUrl();
+      if (!mounted || (revision != _navigationRevision)) return;
+      if (_loadingDocument || _failed || current == null) return;
+      if (current.toString() != message["pageUrl"]) return;
+      const videoHosts = {
+        "youtube.com",
+        "www.youtube.com",
+        "m.youtube.com",
+        "music.youtube.com",
+      };
+      if ((current.scheme != "https") || !videoHosts.contains(current.host)) {
+        return;
+      }
+      widget.callbacks.onVideoLongPress?.call(target);
+    } catch (_) {
+      // A disappearing page must not open a menu for its previous video.
+    }
+  }
 
   @override
   void initState() {
@@ -98,6 +132,15 @@ class _YoutubeWebViewState extends State<YoutubeWebView> {
         injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
         forMainFrameOnly: false,
       ),
+      UserScript(
+        source: youtubeQueueMenuScript(
+          longPressDelay: kLongPressTimeout,
+          touchSlop: kTouchSlop,
+          handlerName: _queueMenuHandler,
+        ),
+        injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+        forMainFrameOnly: true,
+      ),
     ]),
     initialSettings: InAppWebViewSettings(
       incognito: false,
@@ -108,6 +151,10 @@ class _YoutubeWebViewState extends State<YoutubeWebView> {
       supportMultipleWindows: true,
     ),
     onWebViewCreated: (controller) async {
+      controller.addJavaScriptHandler(
+        handlerName: _queueMenuHandler,
+        callback: (arguments) => _onVideoLongPress(controller, arguments),
+      );
       if (defaultTargetPlatform == TargetPlatform.iOS) {
         try {
           await controller.setAllMediaPlaybackSuspended(suspended: true);

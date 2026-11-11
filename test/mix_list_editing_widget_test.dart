@@ -87,15 +87,15 @@ void main() {
       await tester.ensureVisible(find.byTooltip('Track cを移動'));
       await tester.pumpAndSettle();
       final start = tester.getCenter(find.byTooltip('Track cを移動'));
-      final end = tester.getCenter(find.byKey(const ValueKey('a')));
+      final end = tester.getCenter(find.byTooltip("Track aを移動"));
       final gesture = await tester.startGesture(start);
       await gesture.moveTo(Offset(start.dx, end.dy - 10));
       await tester.pump(const Duration(milliseconds: 500));
       await gesture.up();
       await tester.pumpAndSettle();
       expect(
-        tester.getTopLeft(find.byKey(const ValueKey('c'))).dy,
-        lessThan(tester.getTopLeft(find.byKey(const ValueKey('b'))).dy),
+        tester.getTopLeft(find.byTooltip("Track cを移動")).dy,
+        lessThan(tester.getTopLeft(find.byTooltip("Track bを移動")).dy),
       );
       expect(audio.snapshot.position, const Duration(seconds: 25));
       expect(audio.playing, isTrue);

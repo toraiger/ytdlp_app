@@ -243,8 +243,8 @@ class _PlayerScreenState extends State<_PlayerScreen>
     }
   }
 
-  void _removeTrack(String videoId) {
-    final removed = _mix.removeTrack(videoId);
+  void _removeTrack(String entryId) {
+    final removed = _mix.removeTrack(entryId);
     if (removed == null) return;
     if (_mix.items.isEmpty) setState(() => _editingList = false);
     ScaffoldMessenger.of(context)
@@ -286,6 +286,7 @@ class _PlayerScreenState extends State<_PlayerScreen>
     animation: Listenable.merge([_mix, _playback]),
     builder: (context, _) {
       final tracks = _mix.items;
+      final queueItems = _mix.queueItems;
       final trackCount = tracks.length;
       final video = _playback.videoController;
       return Scaffold(
@@ -483,26 +484,27 @@ class _PlayerScreenState extends State<_PlayerScreen>
                           return;
                         }
                         _mix.moveTrack(
-                          tracks[from].videoId,
+                          queueItems[from].entryId,
                           to > from ? to - 1 : to,
                         );
                       },
                       itemCount: tracks.length,
                       itemBuilder:
                           (_, index) => _TrackTile(
-                            key: ValueKey(tracks[index].videoId),
+                            key: ValueKey(queueItems[index].entryId),
                             editIndex: _listEditing ? index : null,
                             canEdit:
                                 !_mix.isLoading &&
                                 !_playback.isBusy &&
                                 !_playback.isUpdatingQueue,
-                            onDelete: () => _removeTrack(tracks[index].videoId),
+                            onDelete:
+                                () => _removeTrack(queueItems[index].entryId),
                             track: tracks[index],
                             number: index + 1,
                             selected:
                                 !_playback.isDirect &&
-                                _playback.currentTrack?.videoId ==
-                                    tracks[index].videoId,
+                                _playback.currentEntryId ==
+                                    queueItems[index].entryId,
                             playing: _playback.isPlaying,
                             onTap:
                                 _mix.isLoading || _listEditing
@@ -521,7 +523,9 @@ class _PlayerScreenState extends State<_PlayerScreen>
                                 children: [
                                   OutlinedButton.icon(
                                     onPressed:
-                                        _mix.isExtending || _mix.isLoading
+                                        !_mix.canExtend ||
+                                                _mix.isExtending ||
+                                                _mix.isLoading
                                             ? null
                                             : _mix.extend,
                                     icon:

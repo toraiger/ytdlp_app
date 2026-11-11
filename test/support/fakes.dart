@@ -136,9 +136,9 @@ class FakeAudioEngine implements AudioEngine {
 
   @override
   Future<void> move(int from, int to) async {
-    final id = _index == null ? null : entries[_index!].track.videoId;
+    final activeEntry = _index == null ? null : entries[_index!];
     entries.insert(to, entries.removeAt(from));
-    if (id != null) _index = entries.indexWhere((e) => e.track.videoId == id);
+    if (activeEntry != null) _index = entries.indexOf(activeEntry);
     indexEvents.add(_index);
   }
 
@@ -228,20 +228,21 @@ class FakeVideoEngine implements VideoEngine {
   }
 
   @override
-  Future<void> play() async {
-    emit(
-      const VideoStatus(
-        initialized: true,
-        playing: true,
-        duration: Duration(seconds: 120),
-      ),
-    );
-  }
+  Future<void> play() async => _setPlaying(true);
 
   @override
-  Future<void> pause() async {
+  Future<void> pause() async => _setPlaying(false);
+
+  void _setPlaying(bool playing) {
     emit(
-      const VideoStatus(initialized: true, duration: Duration(seconds: 120)),
+      VideoStatus(
+        initialized: value.initialized,
+        playing: playing,
+        completed: value.completed,
+        hasError: value.hasError,
+        position: value.position,
+        duration: value.duration,
+      ),
     );
   }
 
@@ -250,6 +251,7 @@ class FakeVideoEngine implements VideoEngine {
     emit(
       VideoStatus(
         initialized: true,
+        playing: value.playing,
         position: position,
         duration: const Duration(seconds: 120),
       ),

@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import "../models/api_models.dart";
+import "../models/mix_queue_item.dart";
 import '../models/youtube_video_page.dart';
 import '../services/api_client.dart';
 import 'mix_controller.dart';
@@ -27,6 +29,7 @@ class YoutubePlaybackController extends ChangeNotifier {
   bool _foreground = true;
   bool _disposed = false;
   int _selectionRevision = 0;
+  Future<void> _additionTail = Future.value();
   ApiClient? _api;
   (String, String?)? _handledPage;
   (String, String?)? _expectedFollow;
@@ -35,8 +38,64 @@ class YoutubePlaybackController extends ChangeNotifier {
   int? _mixRevision;
   String? _singleVideoId;
   String? _lastPlayerVideo;
+  String? _lastPlayerEntryId;
 
   bool get canRetry => _lastSelection != null && !isSelecting;
+  bool get canAddToQueue => !isSelecting && playback.canAddToQueue;
+
+  /// Capture the source before waiting: queued requests from a previous Mix or
+  /// browser selection cannot be applied to a new list after their API returns.
+  Future<bool> addToQueue(
+    YoutubeVideoTarget target,
+    QueueInsertPosition placement,
+  ) {
+    if (!canAddToQueue) return Future.value(false);
+    final api = mix.api;
+    final revision = _selectionRevision;
+    final mixRevision = mix.revision;
+    final requestedMode = playback.mode;
+    bool valid() =>
+        (_isCurrent(revision, api) &&
+            (mixRevision == mix.revision) &&
+            (requestedMode == playback.mode));
+    final operation = _additionTail.then((_) async {
+      if (!valid()) return false;
+      final StreamResponse response;
+      try {
+        response = await api.resolveStream(
+          target.page.videoId,
+          mode: requestedMode,
+        );
+      } catch (_) {
+        if (!valid()) return false;
+        rethrow;
+      }
+      if (!valid()) return false;
+      while (playback.isBusy && valid()) {
+        await playback.readyForQueueAddition;
+      }
+      if (!valid() || !canAddToQueue) return false;
+      final media =
+          requestedMode == PlaybackMode.audio
+              ? response.audio
+              : response.videoAudio;
+      if (media?.url == null) {
+        throw const ApiFailure("この動画に再生可能なURLがありません。");
+      }
+      final track = MixTrack(
+        videoId: target.page.videoId,
+        title: response.title ?? target.title ?? "YouTube動画",
+        channel: "YouTube",
+        duration: response.duration,
+        webpageUrl: YoutubeVideoPage(videoId: target.page.videoId).uri,
+      );
+      return playback.insertQueuedTrack(track, placement);
+    });
+    // A failed addition must not block the following user action.
+    _additionTail = operation.then<void>((_) {}, onError: (Object failure) {});
+    return operation;
+  }
+
   void _notify() {
     if (!_disposed) notifyListeners();
   }
@@ -110,6 +169,7 @@ class YoutubePlaybackController extends ChangeNotifier {
     _expectedFollow = null;
     _lastSelection = null;
     _lastPlayerVideo = null;
+    _lastPlayerEntryId = null;
     error = null;
     pageUri = YoutubeVideoPage.home;
     pageToLoad = null;
@@ -196,8 +256,12 @@ class YoutubePlaybackController extends ChangeNotifier {
     if (_disposed || isSelecting) return;
     final track = playback.currentTrack;
     final id = track?.videoId;
-    if (!force && id == _lastPlayerVideo) return;
+    final entryId = playback.currentEntryId;
+    if (!force && (id == _lastPlayerVideo) && (entryId == _lastPlayerEntryId)) {
+      return;
+    }
     _lastPlayerVideo = id;
+    _lastPlayerEntryId = entryId;
     if (!_visible ||
         !_foreground ||
         id == null ||
@@ -205,7 +269,12 @@ class YoutubePlaybackController extends ChangeNotifier {
       return;
     }
     YoutubeVideoPage? target;
-    if (_mixId != null && _mixRevision == mix.revision && !playback.isDirect) {
+    final queueItem = playback.currentQueueItem;
+    if (queueItem?.source == QueueItemSource.manual) {
+      target = YoutubeVideoPage(videoId: id);
+    } else if (_mixId != null &&
+        _mixRevision == mix.revision &&
+        !playback.isDirect) {
       target = YoutubeVideoPage(videoId: id, mixId: _mixId);
     } else if (_singleVideoId == id && playback.isDirect) {
       target = YoutubeVideoPage(videoId: id);
