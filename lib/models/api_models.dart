@@ -166,6 +166,7 @@ class StreamResponse {
   const StreamResponse({
     required this.videoId,
     this.title,
+    this.duration,
     this.audio,
     this.videoAudio,
   });
@@ -173,6 +174,7 @@ class StreamResponse {
   factory StreamResponse.fromJson(Map<String, dynamic> json) => StreamResponse(
     videoId: requiredString(json, 'video_id'),
     title: json['title'] as String?,
+    duration: parseDuration(json['duration']),
     audio:
         json['audio'] == null
             ? null
@@ -185,6 +187,7 @@ class StreamResponse {
 
   final String videoId;
   final String? title;
+  final Duration? duration;
   final StreamFormat? audio;
   final StreamFormat? videoAudio;
 }

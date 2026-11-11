@@ -5,10 +5,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
+import 'package:mix_player_app/models/native_playback_timing.dart';
 import 'package:mix_player_app/player_app.dart';
 import 'package:mix_player_app/services/app_settings.dart';
 import "package:mix_player_app/services/error_report.dart";
 import "package:mix_player_app/widgets/error_copy_button.dart";
+import "package:mix_player_app/services/playback_engines.dart";
 import 'support/fakes.dart';
 
 void main() {
@@ -17,6 +19,7 @@ void main() {
     MemorySettings settings, {
     FakeAudioEngine? audio,
     FutureOr<http.Response> Function(http.Request)? handler,
+    Map<String, dynamic> Function(String)? streamResponse,
   }) async {
     await tester.pumpWidget(
       PlayerApp(
@@ -25,13 +28,16 @@ void main() {
         apiFactory:
             (serverUrl, apiKey) => mockApi(
               handler ??
-                  (request) => jsonResponse(
-                    request.url.path == '/stream'
-                        ? streamJson(
-                          jsonDecode(request.body)['video_id'] as String,
-                        )
-                        : mixJson(['a', 'b']),
-                  ),
+                  (request) {
+                    if (request.url.path == "/stream") {
+                      final videoId =
+                          jsonDecode(request.body)["video_id"] as String;
+                      return jsonResponse(
+                        (streamResponse ?? streamJson)(videoId),
+                      );
+                    }
+                    return jsonResponse(mixJson(["a", "b"]));
+                  },
             ),
       ),
     );
@@ -309,18 +315,31 @@ void main() {
     },
   );
   testWidgets(
-    'Playback report distinguishes media and list durations without secrets',
+    'Playback report refreshes native timing and keeps all sources free of secrets',
     (tester) async {
       String? copied;
       captureClipboard(tester, (text) => copied = text);
-      final audio = FakeAudioEngine();
+      final audio = _DiagnosticAudioEngine();
       final settings =
           MemorySettings()
             ..snapshot = const SettingsSnapshot(
               serverUrl: 'https://api.example.test',
               apiKey: 'do-not-copy-api-key',
             );
-      await launch(tester, settings, audio: audio);
+      await launch(
+        tester,
+        settings,
+        audio: audio,
+        streamResponse: (id) {
+          final result = streamJson(id)..['duration'] = 237.125;
+          (result['audio'] as Map<String, dynamic>).addAll(<String, Object>{
+            'format_id': '140',
+            'protocol': 'https',
+            'acodec': 'mp4a.40.2',
+          });
+          return result;
+        },
+      );
       await tester.ensureVisible(find.text('Mix を20曲取得'));
       await tester.pumpAndSettle();
       await tester.tap(find.text('Mix を20曲取得'));
@@ -343,9 +362,23 @@ void main() {
       await tester.tap(find.text('再生情報をコピー'));
       await tester.pumpAndSettle();
       expect(copied, contains('一覧の長さ: 02:00'));
+      expect(copied, contains('再生URL取得時の長さ: 03:57'));
       expect(copied, contains('メディアの長さ: 07:07'));
       expect(copied, contains('メディアの経過時間: 05:20'));
       expect(copied, contains('プレーヤー内の曲番号: 1'));
+      expect(copied, contains('形式: 140 / m4a'));
+      expect(copied, contains('配信方式: https'));
+      expect(copied, contains('音声コーデック: mp4a.40.2'));
+      expect(audio.refreshCount, 2);
+      expect(copied, contains('[iOS 表示時] 実曲:1 内部:1 キュー:2 ソース:3'));
+      expect(copied, contains('項目の長さ: 03:57.000 / 音源の長さ: 03:57.000'));
+      expect(copied, contains('シーク範囲の開始: 00:00.000 / 長さ: 07:53.000'));
+      expect(copied, contains('長さの取得元: 曲データ'));
+      expect(copied, contains("M4A初期ヘッダーの正規化: 3か所"));
+      expect(copied, contains("M4A判定: 適用済み"));
+      expect(copied, contains("編集リスト: あり"));
+      expect(copied, contains("編集開始位置: 00:00.036 / 区間の長さ: 03:57.000"));
+      expect(copied, isNot(contains('do-not-copy-video-id')));
       expect(copied, isNot(contains('do-not-copy-api-key')));
       expect(copied, isNot(contains('https://')));
       expect(copied, isNot(contains('Track a')));
@@ -449,4 +482,42 @@ void main() {
     expect(find.textContaining("コピーできませんでした"), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
+}
+
+class _DiagnosticAudioEngine extends FakeAudioEngine
+    implements NativeAudioTimingProvider {
+  int refreshCount = 0;
+  final recorder = NativeTimingRecorder(
+    () async => {
+      'itemDurationUs': 237000000,
+      'assetDurationUs': 237000000,
+      'seekableStartUs': 0,
+      'seekableDurationUs': 473000000,
+      'positionUs': 4000000,
+      'actualIndex': 0,
+      'storedIndex': 0,
+      'queueLength': 2,
+      'sourceCount': 3,
+      'durationSource': 'item',
+      "m4aHeaderFields": 3,
+      "m4aHeaderOutcome": "normalized",
+      "m4aHasEditList": true,
+      "m4aEditVersion": 0,
+      "m4aEditEntryCount": 1,
+      "m4aEditStartUs": 36281,
+      "m4aEditDurationUs": 237000000,
+      'url': 'https://must-not-be-copied.test/private',
+      'videoId': 'do-not-copy-video-id',
+      'headers': {'X-API-Key': 'do-not-copy-api-key'},
+    },
+  );
+
+  @override
+  List<NativePlaybackTiming> get nativeTimingHistory => recorder.history;
+
+  @override
+  Future<void> refreshNativeTiming() async {
+    refreshCount++;
+    await recorder.capture(NativeTimingPhase.inspect);
+  }
 }

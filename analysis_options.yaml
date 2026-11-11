@@ -1,6 +1,10 @@
 include: package:flutter_lints/flutter.yaml
 
 analyzer:
+  # The vendored Dart code is unchanged upstream 0.10.6. Local native changes
+  # are compiled by iOS CI and covered by scripts/test_native_audio.sh.
+  exclude:
+    - packages/just_audio/**
   errors:
     unawaited_futures: warning
 
