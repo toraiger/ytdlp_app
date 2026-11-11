@@ -280,6 +280,122 @@ void main() {
     expect(playback.error, isNull);
     expect(audio.playing, isTrue);
   });
+  test("A newly resolved source can recover after a long pause", () async {
+    await playback.playTrack(0);
+    await drain();
+    await playback.togglePlay();
+    // URLの通常の有効期間を越える一時停止を時計だけ進めて再現する。
+    const pauseBeyondStreamLifetime = Duration(hours: 7);
+    now = now.add(pauseBeyondStreamLifetime);
+
+    audio.errorEvents.add("Source expired while paused");
+    await drain();
+
+    expect(resolutions.where((id) => id == "a"), hasLength(2));
+    expect(audio.loadCount, 2);
+    expect(audio.stopCount, 2);
+    expect(playback.currentIndex, 0);
+    expect(playback.error, isNull);
+    expect(playback.isPlaying, isTrue);
+
+    audio.errorEvents.add("Replacement rejected");
+    await drain();
+    expect(resolutions.where((id) => id == "a"), hasLength(2));
+    expect(playback.error, "Replacement rejected");
+    expect(playback.isPlaying, isFalse);
+  });
+  test("A newly resolved source load failure retries only once", () async {
+    audio.onLoad = (entry) => throw StateError("Media load rejected");
+
+    await playback.playTrack(0);
+    await drain();
+
+    expect(resolutions, ["a", "a"]);
+    expect(audio.loadCount, 2);
+    expect(playback.error, isNotNull);
+    expect(playback.isBusy, isFalse);
+    expect(playback.isPlaying, isFalse);
+    expect(mix.api.cachedMedia("a", PlaybackMode.audio), isNull);
+
+    // Retry through the playback button, without restarting or reloading Mix.
+    audio.onLoad = null;
+    await playback.togglePlay();
+    await drain();
+    expect(resolutions.where((id) => id == "a"), hasLength(3));
+    expect(playback.currentIndex, 0);
+    expect(playback.error, isNull);
+    expect(playback.isPlaying, isTrue);
+  });
+  test("Late native events cannot revive a failed playback", () async {
+    await playback.playTrack(0);
+    await drain();
+    audio.errorEvents.add("Initial failure");
+    await drain();
+    audio.errorEvents.add("Retry failed");
+    await drain();
+
+    audio.stateEvents.add(const AudioStatus(true, AudioPhase.ready));
+    audio.advance(1);
+    audio.stateEvents.add(const AudioStatus(true, AudioPhase.completed));
+    await drain();
+
+    expect(playback.isPlaying, isFalse);
+    expect(playback.currentIndex, 0);
+    expect(playback.error, "Retry failed");
+    expect(resolutions.where((id) => id == "a"), hasLength(2));
+
+    await playback.togglePlay();
+    await drain();
+    expect(resolutions.where((id) => id == "a"), hasLength(3));
+    expect(playback.currentIndex, 0);
+    expect(playback.isPlaying, isTrue);
+    expect(playback.error, isNull);
+  });
+  test("Stopping during automatic recovery prevents late autoplay", () async {
+    await playback.playTrack(0);
+    await drain();
+    final response = Completer<http.Response>();
+    resolveOverride = (id) => response.future;
+    audio.errorEvents.add("Media expired");
+    await drain();
+    expect(playback.isResolvingUrl, isTrue);
+
+    await playback.stop();
+    response.complete(jsonResponse(streamJson("a")));
+    await drain();
+
+    expect(audio.loadCount, 1);
+    expect(playback.currentTrack, isNull);
+    expect(playback.isPlaying, isFalse);
+    expect(playback.isBusy, isFalse);
+    expect(audio.entries, isEmpty);
+  });
+  test("Reloading Mix after failure does not reuse the rejected URL", () async {
+    audio.onLoad = (entry) => throw StateError("Media rejected");
+    await playback.playTrack(0);
+    await drain();
+    expect(resolutions, ["a", "a"]);
+
+    audio.onLoad = null;
+    resolveOverride = (id) {
+      final json = streamJson(id);
+      json["audio"] = {
+        "url": "https://media.example.test/$id-fresh.m4a",
+        "http_headers": {"User-Agent": "fresh-agent"},
+      };
+      return jsonResponse(json);
+    };
+    await mix.load(defaultMixUrl);
+    await drain();
+    await playback.playTrack(0);
+    await drain();
+
+    expect(resolutions.where((id) => id == "a"), hasLength(3));
+    expect(audio.entries.first.uri.path, "/a-fresh.m4a");
+    expect(audio.entries.first.httpHeaders, {"User-Agent": "fresh-agent"});
+    expect(playback.error, isNull);
+    expect(playback.isPlaying, isTrue);
+  });
   test(
     'Automatic advance during append updates the current track and timing',
     () async {

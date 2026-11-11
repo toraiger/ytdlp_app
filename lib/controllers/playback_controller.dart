@@ -197,9 +197,11 @@ class PlaybackController extends ChangeNotifier {
     final generation = ++_generation;
     final selection = ++_selection;
     final requestedMode = mode;
+    final usesApi = mixIndex != null;
     _startupProgress = Stopwatch()..start();
     _firstPreparation = null;
-    _canRefreshCurrent = !refresh && cached;
+    // 新規取得したURLも、一時停止や回線切替の後は失効し得るため1回だけ更新する。
+    _canRefreshCurrent = usesApi && !refresh;
     _playbackFailed = false;
     _pendingAudioError = null;
     _queue.clear();
@@ -262,9 +264,9 @@ class PlaybackController extends ChangeNotifier {
         _onVideoChanged();
         if (_videoForeground) await video.play();
       }
-    } catch (e) {
+    } catch (failure) {
       if (_isCurrent(generation)) {
-        if (cached && !refresh && resolvedMedia) {
+        if ((usesApi && !refresh) && resolvedMedia) {
           await _start(
             track,
             mixIndex: mixIndex,
@@ -275,8 +277,11 @@ class PlaybackController extends ChangeNotifier {
         }
         _startupProgress = null;
         error =
-            e is ApiFailure ? e.message : 'メディアを再生できません。曲を選び直すか、接続状態を確認してください。';
+            failure is ApiFailure
+                ? failure.message
+                : "メディアを再生できません。曲を選び直すか、接続状態を確認してください。";
         _playbackFailed = true;
+        if (usesApi) mix.api.invalidateStream(track.videoId);
         isPlaying = false;
       }
     } finally {
@@ -372,6 +377,7 @@ class PlaybackController extends ChangeNotifier {
     }
     error = value;
     _playbackFailed = true;
+    if (!isDirect) mix.api.invalidateStream(currentTrack!.videoId);
     isPlaying = false;
     _notify();
   }
@@ -546,6 +552,7 @@ class PlaybackController extends ChangeNotifier {
   }
 
   void _syncAudioProgress() {
+    if (_playbackFailed) return;
     if (mode != PlaybackMode.audio || isBusy || currentTrack == null) return;
     final snapshot = _audio.snapshot;
     final index = snapshot.index;
@@ -570,6 +577,8 @@ class PlaybackController extends ChangeNotifier {
 
   void _onAudioState(AudioStatus state) {
     if (mode != PlaybackMode.audio || currentTrack == null) return;
+    // 遅いネイティブ通知でエラー表示を再生中に戻したり、次曲へ進めたりしない。
+    if (_playbackFailed) return;
     isPlaying = state.playing && state.phase != AudioPhase.completed;
     _recordFirstProgress();
     _notify();
@@ -614,6 +623,10 @@ class PlaybackController extends ChangeNotifier {
 
   Future<void> togglePlay() async {
     if (currentTrack == null || isBusy) return;
+    if (_playbackFailed && !isDirect) {
+      await _startTrack(currentTrack!, currentIndex!, refresh: true);
+      return;
+    }
     try {
       if (mode == PlaybackMode.audio) {
         if (isPlaying) {
