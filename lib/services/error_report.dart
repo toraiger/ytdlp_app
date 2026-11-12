@@ -4,6 +4,7 @@ import "package:just_audio/just_audio.dart";
 
 import "../build_info.dart";
 import "../models/api_timing.dart";
+import "../models/audio_transport_diagnostics.dart";
 import "../models/playback_diagnostics.dart";
 import "api_client.dart";
 
@@ -71,6 +72,7 @@ class ErrorReport {
     this.apiTiming,
     this.uptime,
     this.refreshed,
+    this.transport,
   }) : occurredAt = DateTime.now().toUtc(),
        details = FailureDetails.fromException(failure);
 
@@ -82,10 +84,13 @@ class ErrorReport {
   final ApiTiming? apiTiming;
   final Duration? uptime;
   final bool? refreshed;
+  final AudioTransportDiagnostics? transport;
 
   String toText() {
     final player = playback;
     final timing = apiTiming;
+    final connection = transport;
+    final upstream = connection?.upstream;
     return [
       "Mix Player $appVersionLabel",
       if (appRevision.isNotEmpty) "コミット: $appRevision",
@@ -100,6 +105,23 @@ class ErrorReport {
       if (details.httpStatusCode != null)
         "HTTPステータス: ${details.httpStatusCode}",
       if (refreshed != null) "URL再取得後: ${refreshed! ? "はい" : "いいえ"}",
+      if (connection != null) ...[
+        "音声経路: ${connection.route.name}",
+        "通信経路の再構築: ${connection.reset.name}",
+        if (connection.route == AudioTransportRoute.m4aLoopback) ...[
+          "ローカル配信の世代: ${connection.proxyGeneration}",
+          "ローカル配信の起動完了: ${connection.proxyListening}",
+          "ローカル要求の到達数: ${connection.localRequestCount}",
+        ],
+      ],
+      if (upstream != null) ...[
+        "配信元への要求数: ${upstream.attempts}",
+        "配信元取得の段階: ${upstream.stage.name}",
+        "配信元取得の失敗種別: ${upstream.failure.name}",
+        if (upstream.httpStatus != null) "配信元HTTPステータス: ${upstream.httpStatus}",
+        if (upstream.nativeCode != null)
+          "配信元ネイティブエラーコード: ${upstream.nativeCode}",
+      ],
       if (player != null) ...[
         "再生方式: ${player.mode.name}",
         "一覧の曲番号: ${_trackNumber(player.listIndex)}",

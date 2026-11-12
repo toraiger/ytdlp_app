@@ -7,6 +7,7 @@ import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:mix_player_app/models/api_models.dart';
+import "package:mix_player_app/models/audio_transport_diagnostics.dart";
 import 'package:mix_player_app/services/ios_m4a_audio_source.dart';
 import 'package:mix_player_app/services/m4a_fragment_header.dart';
 import 'package:mix_player_app/services/playback_engines.dart';
@@ -303,6 +304,7 @@ void main() {
         await aborted.future.timeout(const Duration(seconds: 1));
         await Future<void>.delayed(Duration.zero);
         expect(errors, isEmpty);
+        expect(source.transferDiagnostics.failure, MediaTransferFailure.none);
       },
     );
   }

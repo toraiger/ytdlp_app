@@ -6,6 +6,7 @@ import "package:just_audio/just_audio.dart";
 import 'package:mix_player_app/controllers/mix_controller.dart';
 import 'package:mix_player_app/controllers/playback_controller.dart';
 import 'package:mix_player_app/models/api_models.dart';
+import "package:mix_player_app/models/audio_transport_diagnostics.dart";
 import 'package:mix_player_app/services/app_settings.dart';
 import "package:mix_player_app/services/error_report.dart";
 import 'package:mix_player_app/services/playback_engines.dart';
@@ -70,6 +71,7 @@ void main() {
     ]);
     expect(playback.isPlaying, isTrue);
     expect(playback.upcomingCount, 2);
+    expect(audio.resetCount, 0);
     audio.advance(1);
     await drain();
     expect(playback.currentIndex, 1);
@@ -296,6 +298,7 @@ void main() {
     expect(resolutions.where((id) => id == "a"), hasLength(2));
     expect(audio.loadCount, 2);
     expect(audio.stopCount, 2);
+    expect(audio.resetCount, 1);
     expect(playback.currentIndex, 0);
     expect(playback.error, isNull);
     expect(playback.isPlaying, isTrue);
@@ -305,6 +308,7 @@ void main() {
     expect(resolutions.where((id) => id == "a"), hasLength(2));
     expect(playback.error, "Replacement rejected");
     expect(playback.isPlaying, isFalse);
+    expect(audio.resetCount, 1);
   });
   test("A newly resolved source load failure retries only once", () async {
     audio.onLoad = (entry) => throw StateError("Media load rejected");
@@ -314,6 +318,7 @@ void main() {
 
     expect(resolutions, ["a", "a"]);
     expect(audio.loadCount, 2);
+    expect(audio.resetCount, 1);
     expect(playback.error, isNotNull);
     expect(playback.isBusy, isFalse);
     expect(playback.isPlaying, isFalse);
@@ -327,7 +332,85 @@ void main() {
     expect(playback.currentIndex, 0);
     expect(playback.error, isNull);
     expect(playback.isPlaying, isTrue);
+    expect(audio.resetCount, 2);
   });
+  test(
+    "A broken transport is reset before loading the refreshed URL",
+    () async {
+      var broken = false;
+      audio.onLoad = (entry) {
+        if (broken) throw PlayerException(-1004, "Connection refused", 0);
+      };
+      audio.onReset = () => broken = false;
+      await playback.playTrack(0);
+      await drain();
+      await playback.pauseVideoForBackground();
+      playback.resumeForeground();
+      expect(audio.resetCount, 0);
+      broken = true;
+      audio.emitError("Connection refused");
+      await drain();
+      expect(audio.resetCount, 1);
+      expect(playback.error, isNull);
+      expect(playback.isPlaying, isTrue);
+      expect(playback.currentIndex, 0);
+      expect(resolutions.where((videoId) => videoId == "a"), hasLength(2));
+    },
+  );
+  test(
+    "Reset failure is bounded and recorded instead of loading a stale URL",
+    () async {
+      await playback.playTrack(0);
+      await drain();
+      audio.onReset = () => throw StateError("private connection data");
+      audio.emitError("Connection refused");
+      await drain();
+      expect(audio.resetCount, 1);
+      expect(audio.loadCount, 1);
+      expect(playback.isPlaying, isFalse);
+      final report = playback.errorReport!;
+      expect(report.transport!.reset, TransportResetState.failed);
+      expect(report.toText(), isNot(contains("private")));
+      audio.emitError("Duplicate failure");
+      await drain();
+      expect(audio.resetCount, 1);
+      audio.onReset = null;
+      await playback.togglePlay();
+      await drain();
+      expect(audio.resetCount, 2);
+      expect(playback.isPlaying, isTrue);
+    },
+  );
+  for (final stopDuringReset in [false, true]) {
+    test(
+      "Stop/selection during reset cannot autoplay the old track ($stopDuringReset)",
+      () async {
+        await playback.playTrack(0);
+        await drain();
+        final reset = Completer<void>();
+        audio.onReset = () => reset.future;
+        audio.emitError("Connection refused");
+        await drain();
+        expect(audio.resetCount, 1);
+        final selecting =
+            stopDuringReset ? playback.stop() : playback.playTrack(3);
+        reset.complete();
+        await selecting;
+        await drain();
+        if (stopDuringReset) {
+          expect(playback.currentTrack, isNull);
+          expect(audio.entries, isEmpty);
+          expect(audio.loadCount, 1);
+          expect(playback.isPlaying, isFalse);
+        } else {
+          expect(playback.currentIndex, 3);
+          expect(audio.entries.first.track.videoId, "d");
+          expect(audio.loadCount, 2);
+          expect(playback.isPlaying, isTrue);
+        }
+      },
+    );
+  }
   test("Late native events cannot revive a failed playback", () async {
     await playback.playTrack(0);
     await drain();

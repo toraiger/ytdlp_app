@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:mix_player_app/services/api_client.dart';
+import "package:mix_player_app/models/audio_transport_diagnostics.dart";
 import 'package:mix_player_app/services/app_settings.dart';
 import "package:mix_player_app/services/error_report.dart";
 import 'package:mix_player_app/services/playback_engines.dart';
@@ -80,6 +81,11 @@ class FakeAudioEngine implements AudioEngine {
   final entries = <QueueEntry>[];
   int loadCount = 0;
   int stopCount = 0;
+  int resetCount = 0;
+  FutureOr<void> Function()? onReset;
+  @override
+  AudioTransportDiagnostics transportDiagnostics =
+      const AudioTransportDiagnostics();
   Duration? lastSeek;
   bool playing = false;
   FutureOr<void> Function(QueueEntry entry)? onAppend;
@@ -158,6 +164,23 @@ class FakeAudioEngine implements AudioEngine {
     _position = Duration.zero;
     _duration = null;
     stateEvents.add(const AudioStatus(false, AudioPhase.idle));
+  }
+
+  @override
+  Future<void> resetTransport() async {
+    resetCount++;
+    try {
+      await stop();
+      await onReset?.call();
+      transportDiagnostics = const AudioTransportDiagnostics(
+        reset: TransportResetState.completed,
+      );
+    } catch (failure) {
+      transportDiagnostics = const AudioTransportDiagnostics(
+        reset: TransportResetState.failed,
+      );
+      rethrow;
+    }
   }
 
   @override

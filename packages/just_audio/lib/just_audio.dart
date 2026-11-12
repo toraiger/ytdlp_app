@@ -15,6 +15,9 @@ import 'package:rxdart/rxdart.dart';
 import 'package:synchronized/synchronized.dart';
 import 'package:uuid/uuid.dart';
 
+import "src/local_proxy_server.dart";
+export "src/local_proxy_server.dart" show LocalProxySnapshot;
+
 const _uuid = Uuid();
 
 JustAudioPlatform? _pluginPlatformCache;
@@ -1174,6 +1177,16 @@ class AudioPlayer {
     await future;
   }
 
+  /// Rebuilds the local stream transport on the next load. Stop first so native
+  /// items cannot continue using URLs from the listener being closed.
+  Future<void> resetLocalProxy() async {
+    if (_disposed) return;
+    if (_active) throw StateError("Stop playback before resetting its proxy");
+    await _proxy.stop();
+  }
+
+  LocalProxySnapshot get localProxySnapshot => _proxy.snapshot;
+
   /// Sets the volume of this player, where 1.0 is normal volume.
   Future<void> setVolume(final double volume) async {
     if (_disposed) return;
@@ -1423,7 +1436,7 @@ class AudioPlayer {
         s._dispose();
       }
       _audioSources.clear();
-      _proxy.stop();
+      await _proxy.stop();
       await _playerDataSubscription?.cancel();
       await _playbackEventSubscription?.cancel();
       await _androidAudioAttributesSubscription?.cancel();
@@ -2461,18 +2474,19 @@ class AndroidExtractorOptions {
 
 /// A local proxy HTTP server for making remote GET requests with headers.
 class _ProxyHttpServer {
-  late HttpServer _server;
-  bool _running = false;
+  final _listener = LocalProxyServer();
+  Future<void>? _resetting;
 
   /// Maps request keys to [_ProxyHandler]s.
   final Map<String, _ProxyHandler> _handlerMap = {};
 
   /// The port this server is bound to on localhost. This is set only after
-  /// [start] has completed.
-  int get port => _server.port;
+  /// [ensureRunning] has completed.
+  int get port => _listener.port;
+  LocalProxySnapshot get snapshot => _listener.snapshot;
 
   /// Registers a [UriAudioSource] to be served through this proxy. This may be
-  /// called only after [start] has completed.
+  /// called only after [ensureRunning] has completed.
   Uri addUriAudioSource(UriAudioSource source) {
     final uri = source.uri;
     final headers = <String, String>{};
@@ -2493,7 +2507,7 @@ class _ProxyHttpServer {
   }
 
   /// Registers a [StreamAudioSource] to be served through this proxy. This may
-  /// be called only after [start] has completed.
+  /// be called only after [ensureRunning] has completed.
   Uri addStreamAudioSource(StreamAudioSource source) {
     final uri = _sourceUri(source);
     final path = _requestKey(uri);
@@ -2511,33 +2525,36 @@ class _ProxyHttpServer {
   String _requestKey(Uri uri) => '${uri.path}?${uri.query}';
 
   /// Starts the server if it is not already running.
-  Future<dynamic> ensureRunning() async {
-    if (_running) return;
-    return await start();
+  Future<void> ensureRunning() async {
+    await _resetting;
+    await _listener.ensureRunning(_handle);
   }
 
-  /// Starts the server.
-  Future<dynamic> start() async {
-    _running = true;
-    _server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-    _server.listen((request) async {
-      if (request.method == 'GET') {
-        final uriPath = _requestKey(request.uri);
-        final handler = _handlerMap[uriPath]!;
-        handler(this, request);
-      }
-    }, onDone: () {
-      _running = false;
-    }, onError: (Object e, StackTrace st) {
-      _running = false;
-    });
+  Future<void> _handle(HttpRequest request) async {
+    if (request.method != "GET") {
+      request.response.statusCode = HttpStatus.methodNotAllowed;
+      await request.response.close();
+      return;
+    }
+    final handler = _handlerMap[_requestKey(request.uri)];
+    if (handler == null) {
+      request.response.statusCode = HttpStatus.notFound;
+      await request.response.close();
+      return;
+    }
+    await handler(this, request);
   }
 
-  /// Stops the server
-  Future<dynamic> stop() async {
-    if (!_running) return;
-    _running = false;
-    return await _server.close();
+  /// Await shutdown before releasing routes, including sources/headers they own.
+  Future<void> stop() => _resetting ??= _stopAndClear();
+
+  Future<void> _stopAndClear() async {
+    try {
+      await _listener.stop();
+    } finally {
+      _handlerMap.clear();
+      _resetting = null;
+    }
   }
 }
 
@@ -3745,7 +3762,7 @@ class _StreamingByteRangeRequest {
 }
 
 /// The type of functions that can handle HTTP requests sent to the proxy.
-typedef _ProxyHandler = void Function(
+typedef _ProxyHandler = Future<void> Function(
     _ProxyHttpServer server, HttpRequest request);
 
 /// A proxy handler for serving audio from a [StreamAudioSource].

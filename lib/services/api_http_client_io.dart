@@ -2,6 +2,11 @@ import 'dart:io';
 
 import 'package:cupertino_http/cupertino_http.dart';
 import 'package:http/http.dart' as http;
+import "package:objective_c/objective_c.dart" show NSError$Methods;
+
+// NSError descriptions/userInfo can contain URLs. Keep only the numeric code.
+int? nativeHttpErrorCode(Object failure) =>
+    failure is NSErrorClientException ? failure.error.code : null;
 
 http.Client createApiHttpClient() {
   if (!Platform.isIOS) return http.Client();

@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:mix_player_app/models/native_playback_timing.dart';
+import "package:mix_player_app/models/audio_transport_diagnostics.dart";
 import 'package:mix_player_app/player_app.dart';
 import 'package:mix_player_app/services/app_settings.dart';
 import "package:mix_player_app/services/error_report.dart";
@@ -408,6 +409,18 @@ void main() {
     await tester.pumpAndSettle();
     const failurePosition = Duration(seconds: 37);
     audio.positionEvents.add(failurePosition);
+    audio.transportDiagnostics = const AudioTransportDiagnostics(
+      route: AudioTransportRoute.m4aLoopback,
+      reset: TransportResetState.completed,
+      proxyGeneration: 2,
+      proxyListening: true,
+      localRequestCount: 1,
+      upstream: MediaTransferDiagnostics(
+        attempts: 1,
+        stage: MediaTransferStage.prefix,
+        failure: MediaTransferFailure.connection,
+      ),
+    );
     audio.emitError(
       "音声を再生できません。",
       details: const FailureDetails(
@@ -419,9 +432,13 @@ void main() {
     await tester.pumpAndSettle();
     // コピー直前の通知では、エラー発生時の位置を上書きしない。
     audio.positionEvents.add(Duration.zero);
+    audio.transportDiagnostics = const AudioTransportDiagnostics();
     await tapVisible(tester, find.byTooltip("エラー詳細をコピー"));
 
     expect(copied, contains("ネイティブエラーコード: -1009"));
+    expect(copied, contains("音声経路: m4aLoopback"));
+    expect(copied, contains("通信経路の再構築: completed"));
+    expect(copied, contains("配信元取得の失敗種別: connection"));
     expect(
       copied,
       contains("メディアの経過時間(ms): ${failurePosition.inMilliseconds}"),

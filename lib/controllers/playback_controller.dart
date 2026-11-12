@@ -153,6 +153,8 @@ class PlaybackController extends ChangeNotifier {
       operation: operation,
       message: message,
       failure: failure,
+      transport:
+          mode == PlaybackMode.audio ? _audio.transportDiagnostics : null,
       playback: diagnostics,
       uptime: _uptime.elapsed,
       refreshed: refreshed ?? _currentWasRefreshed,
@@ -300,7 +302,10 @@ class PlaybackController extends ChangeNotifier {
         Future.sync(() => resolve(refresh)),
         (() async {
           await _releaseVideo();
-          await _mutateAudio(generation, _audio.stop);
+          await _mutateAudio(
+            generation,
+            refresh ? _audio.resetTransport : _audio.stop,
+          );
           return null;
         })(),
       ]);

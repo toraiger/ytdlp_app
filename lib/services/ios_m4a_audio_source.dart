@@ -6,6 +6,7 @@ import "package:http/http.dart" as http;
 import "package:just_audio/just_audio.dart";
 
 import "api_http_client.dart";
+import "../models/audio_transport_diagnostics.dart";
 import "../models/m4a_header_diagnostics.dart";
 import "m4a_fragment_header.dart";
 
@@ -53,6 +54,44 @@ class IosM4aAudioSource extends StreamAudioSource {
   String? _validatorHeader;
   bool _closed = false;
   bool _headerReady = false;
+  int _attempts = 0;
+  int _localRequestCount = 0;
+  MediaTransferStage _stage = MediaTransferStage.notStarted;
+  MediaTransferFailure _failureKind = MediaTransferFailure.none;
+  int? _httpStatus;
+  int? _nativeCode;
+
+  int get localRequestCount => _localRequestCount;
+
+  MediaTransferDiagnostics get transferDiagnostics => MediaTransferDiagnostics(
+    attempts: _attempts,
+    stage: _stage,
+    failure: _failureKind,
+    httpStatus: _httpStatus,
+    nativeCode: _nativeCode,
+  );
+
+  void _recordFailure(
+    Object failure,
+    MediaTransferStage stage, {
+    MediaTransferFailure? kind,
+  }) {
+    // Cancellation during cleanup must not replace the failure that caused it.
+    if (_failureKind != MediaTransferFailure.none) return;
+    _stage = stage;
+    _nativeCode = nativeHttpErrorCode(failure);
+    _failureKind = kind ?? _classifyFailure(failure);
+  }
+
+  MediaTransferFailure _classifyFailure(Object failure) {
+    if (failure is TimeoutException) return MediaTransferFailure.timeout;
+    if (failure is http.RequestAbortedException) {
+      return MediaTransferFailure.cancelled;
+    }
+    if (_closed) return MediaTransferFailure.closed;
+    if (failure is http.ClientException) return MediaTransferFailure.connection;
+    return MediaTransferFailure.invalidResponse;
+  }
 
   int? get normalizedDurationFields =>
       _headerReady ? _header.durationFields.length : null;
@@ -67,7 +106,7 @@ class IosM4aAudioSource extends StreamAudioSource {
   Future<void> _prepare() async {
     var wanted = 64 * 1024;
     while (true) {
-      final response = await _open(0, wanted);
+      final response = await _open(0, wanted, stage: MediaTransferStage.prefix);
       final bytes = BytesBuilder(copy: false);
       try {
         await for (final chunk in _slice(
@@ -95,6 +134,7 @@ class IosM4aAudioSource extends StreamAudioSource {
   Future<_MediaResponse> _open(
     int start,
     int end, {
+    required MediaTransferStage stage,
     Completer<void>? cancellation,
   }) async {
     if (_closed) throw _failure();
@@ -106,12 +146,17 @@ class IosM4aAudioSource extends StreamAudioSource {
     }
 
     try {
+      _attempts++;
+      if (_failureKind == MediaTransferFailure.none) _stage = stage;
       final request =
           http.AbortableRequest("GET", uri, abortTrigger: abort.future)
             ..headers.addAll(_headers)
             ..headers["Range"] = "bytes=$start-${end - 1}";
       if (_validator != null) request.headers["If-Range"] = _validator!;
       final response = await _client.send(request).timeout(timeout);
+      if (_failureKind == MediaTransferFailure.none) {
+        _httpStatus = response.statusCode;
+      }
       if (_closed ||
           abort.isCompleted ||
           !{"", "identity"}.contains(
@@ -141,6 +186,15 @@ class IosM4aAudioSource extends StreamAudioSource {
         length = response.contentLength!;
         offset = 0;
       } else {
+        final failure = _failure();
+        _recordFailure(
+          failure,
+          stage,
+          kind:
+              response.statusCode == 200
+                  ? MediaTransferFailure.invalidResponse
+                  : MediaTransferFailure.httpStatus,
+        );
         throw _failure();
       }
       if (length <= 0) {
@@ -153,6 +207,11 @@ class IosM4aAudioSource extends StreamAudioSource {
                   (response.statusCode != 206 ||
                       response.headers.containsKey(_validatorHeader))))) {
         // A response from another representation must not reuse cached bytes.
+        _recordFailure(
+          _failure(),
+          stage,
+          kind: MediaTransferFailure.invalidResponse,
+        );
         this.close();
         throw _failure();
       }
@@ -169,8 +228,15 @@ class IosM4aAudioSource extends StreamAudioSource {
         }
       }
       _length = length;
-      return _MediaResponse(response.stream, offset, close);
-    } on Object {
+      return _MediaResponse(
+        response.stream,
+        offset,
+        close,
+        stage,
+        () => abort.isCompleted,
+      );
+    } catch (failure) {
+      if (!abort.isCompleted) _recordFailure(failure, stage);
       close();
       // http exceptions can contain signed URLs. Expose a fixed message only.
       throw _failure();
@@ -193,7 +259,9 @@ class IosM4aAudioSource extends StreamAudioSource {
         if (at >= end) break;
       }
       if (emitted != end - start) throw _failure();
-    } on Object {
+    } catch (failure) {
+      // Seeks normally cancel an old range. That is not an upstream failure.
+      if (!response.isCancelled()) _recordFailure(failure, response.stage);
       throw _failure();
     } finally {
       response.close();
@@ -202,8 +270,14 @@ class IosM4aAudioSource extends StreamAudioSource {
 
   @override
   Future<StreamAudioResponse> request([int? start, int? end]) async {
+    _localRequestCount++;
     if (_closed) throw _failure();
-    await (_prepared ??= _prepare());
+    try {
+      await (_prepared ??= _prepare());
+    } catch (failure) {
+      _recordFailure(failure, MediaTransferStage.prefix);
+      rethrow;
+    }
     final from = start ?? 0;
     final to = math.min(end ?? _length!, _length!);
     if (from < 0 || from >= to) throw _failure();
@@ -260,7 +334,12 @@ class IosM4aAudioSource extends StreamAudioSource {
           return;
         }
         final abort = cancellation = Completer<void>();
-        final response = await _open(at, end, cancellation: abort);
+        final response = await _open(
+          at,
+          end,
+          stage: MediaTransferStage.range,
+          cancellation: abort,
+        );
         if (finished) {
           response.close();
           return;
@@ -308,8 +387,16 @@ class IosM4aAudioSource extends StreamAudioSource {
 }
 
 class _MediaResponse {
-  const _MediaResponse(this.stream, this.offset, this.close);
+  const _MediaResponse(
+    this.stream,
+    this.offset,
+    this.close,
+    this.stage,
+    this.isCancelled,
+  );
   final Stream<List<int>> stream;
   final int offset;
   final void Function() close;
+  final MediaTransferStage stage;
+  final bool Function() isCancelled;
 }

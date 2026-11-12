@@ -21,6 +21,12 @@ Local changes:
   URL uses `localhost`, matching the app's narrowly scoped ATS exception.
 - Stream-proxy cancellation completes on disconnect/error as well as EOF,
   cancelling the upstream subscription when native seeks or reloads close it.
+- The loopback listener shares pending starts and awaits forced shutdown. Bind
+  failure and an old listener's completion cannot leave stale running state.
+  Unknown routes return 404 and unsupported methods return 405.
+- `AudioPlayer.resetLocalProxy()` can be called after stopping playback to drop
+  old routes and rebind on the next load, preserving the one-player background
+  service. `localProxySnapshot` exposes only generation/count/listening values.
 
 The shared policy is in `MixAudioTimeline.h/.m`; the Objective-C tests in the
 application's `test/native` exercise that same production code on macOS CI.

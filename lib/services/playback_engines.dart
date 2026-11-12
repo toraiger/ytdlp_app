@@ -5,6 +5,7 @@ import 'package:just_audio_background/just_audio_background.dart';
 import 'package:video_player/video_player.dart';
 
 import '../models/api_models.dart';
+import "../models/audio_transport_diagnostics.dart";
 import "error_report.dart";
 import "../models/native_playback_timing.dart";
 import "ios_m4a_audio_source.dart";
@@ -90,6 +91,7 @@ AudioSource createAudioSource(QueueEntry entry, {TargetPlatform? platform}) {
 
 abstract interface class AudioEngine {
   AudioSnapshot get snapshot;
+  AudioTransportDiagnostics get transportDiagnostics;
   Stream<AudioStatus> get states;
   Stream<Duration> get positions;
   Stream<Duration?> get durations;
@@ -100,6 +102,7 @@ abstract interface class AudioEngine {
   Future<void> play();
   Future<void> pause();
   Future<void> stop();
+  Future<void> resetTransport();
   Future<void> seek(Duration position, {int? index});
   Future<void> dispose();
 }
@@ -116,6 +119,45 @@ class JustAudioEngine implements AudioEngine, NativeAudioTimingProvider {
   );
   final _sources = <AudioSource>[];
   int _timingEpoch = 0;
+  AudioTransportRoute _route = AudioTransportRoute.unknown;
+  TransportResetState _reset = TransportResetState.notRequested;
+  MediaTransferDiagnostics? _previousTransfer;
+  int _previousLocalRequestCount = 0;
+
+  AudioSource? get _currentSource {
+    final index = _player.playbackEvent.currentIndex;
+    if (index != null && (index >= 0 && index < _sources.length)) {
+      return _sources[index];
+    }
+    return _sources.length == 1 ? _sources.first : null;
+  }
+
+  @override
+  AudioTransportDiagnostics get transportDiagnostics {
+    final proxy = _player.localProxySnapshot;
+    final source = _currentSource;
+    final route = source == null ? _route : _sourceRoute(source);
+    return AudioTransportDiagnostics(
+      route: route,
+      reset: _reset,
+      proxyGeneration: proxy.generation,
+      proxyListening: proxy.listening,
+      localRequestCount:
+          source is IosM4aAudioSource
+              ? source.localRequestCount
+              : _previousLocalRequestCount,
+      upstream:
+          source is IosM4aAudioSource
+              ? source.transferDiagnostics
+              : _previousTransfer,
+    );
+  }
+
+  AudioTransportRoute _sourceRoute(AudioSource source) {
+    if (source is IosM4aAudioSource) return AudioTransportRoute.m4aLoopback;
+    if (source is HlsAudioSource) return AudioTransportRoute.hls;
+    return AudioTransportRoute.direct;
+  }
 
   Future<Map<Object?, Object?>?> _readNativeTiming() async {
     if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) return null;
@@ -194,6 +236,9 @@ class JustAudioEngine implements AudioEngine, NativeAudioTimingProvider {
     final epoch = ++_timingEpoch;
     _timing.invalidate(clear: true);
     final source = createAudioSource(entry);
+    _route = _sourceRoute(source);
+    _previousTransfer = null;
+    _previousLocalRequestCount = 0;
     final previous = _sources.toList();
     _sources
       ..clear()
@@ -229,7 +274,30 @@ class JustAudioEngine implements AudioEngine, NativeAudioTimingProvider {
   Future<void> stop() {
     _timingEpoch++;
     _timing.invalidate(clear: true);
+    _reset = TransportResetState.notRequested;
     return _player.stop();
+  }
+
+  @override
+  Future<void> resetTransport() async {
+    try {
+      final source = _currentSource;
+      if (source != null) _route = _sourceRoute(source);
+      if (source is IosM4aAudioSource) {
+        _previousTransfer = source.transferDiagnostics;
+        _previousLocalRequestCount = source.localRequestCount;
+      }
+      await stop();
+      // Keep the AudioPlayer and its subscriptions: background playback supports
+      // one player. Stop native reads before closing clients and proxy routes.
+      _closeSources(_sources);
+      _sources.clear();
+      await _player.resetLocalProxy();
+      _reset = TransportResetState.completed;
+    } catch (failure) {
+      _reset = TransportResetState.failed;
+      rethrow;
+    }
   }
 
   @override
