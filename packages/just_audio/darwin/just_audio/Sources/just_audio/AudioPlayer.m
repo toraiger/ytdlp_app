@@ -60,6 +60,7 @@ static id MixTimeNumber(CMTime time) {
     NSNumber *_errorCode;
     NSString *_errorMessage;
     MixCompletionTracker *_mixCompletions;
+    NSMutableSet<NSString *> *_mixHeldSources;
 }
 
 - (instancetype)initWithRegistrar:(NSObject<FlutterPluginRegistrar> *)registrar playerId:(NSString*)idParam loadConfiguration:(NSDictionary *)loadConfiguration useLazyPreparation:(BOOL)useLazyPreparation {
@@ -79,6 +80,7 @@ static id MixTimeNumber(CMTime time) {
            messenger:[registrar messenger]];
     _index = 0;
     _mixCompletions = [[MixCompletionTracker alloc] init];
+    _mixHeldSources = [[NSMutableSet alloc] init];
     _processingState = psIdle;
     _loopMode = lmLoopOff;
     _shuffleModeEnabled = NO;
@@ -206,6 +208,73 @@ static id MixTimeNumber(CMTime time) {
     return _speed;
 }
 
+- (void)mixPreparationForItem:(IndexedPlayerItem *)item {
+    if (!self.mixPreparationEvent || !item.audioSource) return;
+    if (item.status != AVPlayerItemStatusReadyToPlay && item.status != AVPlayerItemStatusFailed) return;
+    self.mixPreparationEvent(@{
+        @"sourceId": item.audioSource.sourceId,
+        @"index": @([self indexForItem:item]),
+        @"ready": @(item.status == AVPlayerItemStatusReadyToPlay),
+        @"code": @(item.error.code)
+    });
+}
+
+- (NSArray<NSString *> *)mixHoldUpcoming:(NSArray<NSString *> *)sourceIds {
+    NSInteger actualIndex = [self mixPlaybackIndex];
+    BOOL holdFollowing = NO;
+    for (NSInteger sourceIndex = MAX(0, actualIndex + 1); sourceIndex < _indexedAudioSources.count; sourceIndex++) {
+        IndexedAudioSource *source = _indexedAudioSources[sourceIndex];
+        if ([sourceIds containsObject:source.sourceId]) {
+            holdFollowing = YES;
+            [_mixHeldSources addObject:source.sourceId];
+        }
+        if (!holdFollowing) continue;
+        // Never remove the active item, including when Dart's index is late.
+        if (source.playerItem != _player.currentItem) [_player removeItem:source.playerItem];
+    }
+    [self updateEndAction];
+    return _mixHeldSources.allObjects;
+}
+
+- (BOOL)mixReplaceUpcoming:(NSDictionary *)request {
+    NSInteger sourceIndex = [request[@"index"] integerValue];
+    NSInteger actualIndex = [self mixPlaybackIndex];
+    if (sourceIndex <= actualIndex || sourceIndex < 0 || sourceIndex >= _indexedAudioSources.count) return NO;
+    IndexedAudioSource *previous = _indexedAudioSources[sourceIndex];
+    if (![previous.sourceId isEqualToString:request[@"sourceId"]] || previous.playerItem == _player.currentItem) return NO;
+    NSMutableArray *matches = [[NSMutableArray alloc] init];
+    [_audioSource findById:request[@"playlistId"] matches:matches];
+    if (matches.count != 1 || ![matches.firstObject isKindOfClass:[ConcatenatingAudioSource class]]) return NO;
+    ConcatenatingAudioSource *playlist = matches.firstObject;
+    AudioSource *replacement = [self decodeAudioSource:request[@"source"]];
+    [self removeItemObservers:previous.playerItem];
+    if (previous.playerItem2) [self removeItemObservers:previous.playerItem2];
+    [playlist removeSourcesFromIndex:(int)sourceIndex toIndex:(int)sourceIndex + 1];
+    [playlist insertSource:replacement atIndex:(int)sourceIndex];
+    [playlist setShuffleOrder:request[@"shuffleOrder"]];
+    [_mixHeldSources removeObject:previous.sourceId];
+    _indexedAudioSources = [[NSMutableArray alloc] init];
+    [_audioSource buildSequence:_indexedAudioSources treeIndex:0];
+    IndexedAudioSource *newSource = _indexedAudioSources[sourceIndex];
+    newSource.playerItem.audioSource = newSource;
+    [self addItemObservers:newSource.playerItem];
+    [self updateOrder];
+    [self enqueueFrom:(int)MAX(0, actualIndex)];
+    [newSource attach:_player initialPos:kCMTimeInvalid];
+    [self mixPreparationForItem:newSource.playerItem];
+    [self broadcastPlaybackEvent];
+    return YES;
+}
+
+- (BOOL)mixRetirePlayed:(NSDictionary *)request {
+    NSInteger count = [request[@"count"] integerValue];
+    NSInteger actualIndex = [self indexForItem:(IndexedPlayerItem *)_player.currentItem];
+    if (count <= 0 || actualIndex != count || actualIndex >= _indexedAudioSources.count) return NO;
+    if (![_indexedAudioSources[actualIndex].sourceId isEqualToString:request[@"currentSourceId"]]) return NO;
+    [self concatenatingRemoveRange:request[@"playlistId"] start:0 end:(int)count shuffleOrder:request[@"shuffleOrder"]];
+    return YES;
+}
+
 // Untested
 - (void)concatenatingInsertAll:(NSString *)catId index:(int)index sources:(NSArray *)sources shuffleOrder:(NSArray<NSNumber *> *)shuffleOrder {
     // Find all duplicates of the identified ConcatenatingAudioSource.
@@ -261,21 +330,14 @@ static id MixTimeNumber(CMTime time) {
     NSArray<IndexedAudioSource *> *oldIndexedAudioSources = _indexedAudioSources;
     _indexedAudioSources = [[NSMutableArray alloc] init];
     [_audioSource buildSequence:_indexedAudioSources treeIndex:0];
-    for (int i = 0, j = 0; i < _indexedAudioSources.count; i++, j++) {
-        IndexedAudioSource *audioSource = _indexedAudioSources[i];
-        while (audioSource != oldIndexedAudioSources[j]) {
-            [self removeItemObservers:oldIndexedAudioSources[j].playerItem];
-            if (oldIndexedAudioSources[j].playerItem2) {
-                [self removeItemObservers:oldIndexedAudioSources[j].playerItem2];
-            }
-            if (j < _index) {
-                _index--;
-            } else if (j == _index) {
-                // The currently playing item was removed.
-            }
-            j++;
-        }
+    for (IndexedAudioSource *oldSource in oldIndexedAudioSources) {
+        if ([_indexedAudioSources containsObject:oldSource]) continue;
+        [self removeItemObservers:oldSource.playerItem];
+        if (oldSource.playerItem2) [self removeItemObservers:oldSource.playerItem2];
+        [_mixHeldSources removeObject:oldSource.sourceId];
     }
+    NSInteger actualIndex = [self indexForItem:(IndexedPlayerItem *)_player.currentItem];
+    if (actualIndex >= 0) _index = (int)actualIndex;
     [self updateOrder];
     if (_index >= _indexedAudioSources.count) _index = (int)_indexedAudioSources.count - 1;
     if (_index < 0) _index = 0;
@@ -597,6 +659,10 @@ static id MixTimeNumber(CMTime time) {
             int si = [_order[i] intValue];
             if (si == _index) include = YES;
             if (include && _indexedAudioSources[si].playerItem != existingItem) {
+                if ([_mixHeldSources containsObject:_indexedAudioSources[si].sourceId]) {
+                    _enqueuedAll = NO;
+                    break;
+                }
                 if (_indexedAudioSources[si].lazyLoading && _player.items.count >= TREADMILL_SIZE) {
                     // Enqueue up until the first lazy item that does not fit on the treadmill.
                     _enqueuedAll = NO;
@@ -654,6 +720,7 @@ static id MixTimeNumber(CMTime time) {
 }
 
 - (void)load:(NSDictionary *)source initialPosition:(CMTime)initialPosition initialIndex:(NSNumber *)initialIndex result:(FlutterResult)result {
+    [_mixHeldSources removeAllObjects];
     [_mixCompletions reset];
     _justAdvanced = NO;
     _seekPos = kCMTimeInvalid;
@@ -819,6 +886,12 @@ static id MixTimeNumber(CMTime time) {
             storedIndex:_index actualIndex:actual successorIndex:successor
             seeking:CMTIME_IS_VALID(_seekPos) || _processingState == psLoading]) return;
 
+    if (successor >= 0 && [_mixHeldSources containsObject:_indexedAudioSources[successor].sourceId]) {
+        _index = (int)endedIndex;
+        [self complete];
+        return;
+    }
+
     if (successor >= 0) {
         [endedSource seek:kCMTimeZero];
         _index = (int)successor;
@@ -871,6 +944,7 @@ static id MixTimeNumber(CMTime time) {
             status = statusNumber.intValue;
         }
         [playerItem.audioSource onStatusChanged:status];
+        [self mixPreparationForItem:playerItem];
         switch (status) {
             case AVPlayerItemStatusReadyToPlay: {
                 if (playerItem != _player.currentItem) return;
@@ -918,6 +992,8 @@ static id MixTimeNumber(CMTime time) {
                 //NSLog(@"AVPlayerItemStatusFailed on item [%d]", [self indexForItem:playerItem]);
                 if (playerItem == _player.currentItem) {
                     [self sendErrorForItem:playerItem];
+                } else {
+                    [self mixHoldUpcoming:@[playerItem.audioSource.sourceId]];
                 }
                 break;
             }
@@ -1055,6 +1131,11 @@ static id MixTimeNumber(CMTime time) {
 }
 
 - (void)sendErrorForItem:(IndexedPlayerItem *)playerItem {
+    if (playerItem != _player.currentItem) {
+        [self mixPreparationForItem:playerItem];
+        [self mixHoldUpcoming:@[playerItem.audioSource.sourceId]];
+        return;
+    }
     [self sendError:@((int)playerItem.error.code) errorMessage:playerItem.error.localizedDescription playerItem:playerItem switchToIdle:YES];
     [_player removeAllItems];
 }
@@ -1200,7 +1281,9 @@ static id MixTimeNumber(CMTime time) {
     // - when the shuffle order changes. (TODO)
     // - when the shuffle mode changes.
     if (!_player) return;
-    if (_audioSource && (_loopMode != lmLoopOff || ([_order count] > 0 && [_orderInv[_index] intValue] + 1 < [_order count]))) {
+    NSInteger successor = MixSuccessorIndex(_order, _index, _loopMode);
+    BOOL held = successor >= 0 && [_mixHeldSources containsObject:_indexedAudioSources[successor].sourceId];
+    if (_audioSource && !held && (_loopMode != lmLoopOff || ([_order count] > 0 && [_orderInv[_index] intValue] + 1 < [_order count]))) {
         _player.actionAtItemEnd = AVPlayerActionAtItemEndAdvance;
     } else {
         _player.actionAtItemEnd = AVPlayerActionAtItemEndPause; // AVPlayerActionAtItemEndNone

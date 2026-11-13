@@ -2,10 +2,13 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
+import "package:just_audio/just_audio.dart";
 import 'package:mix_player_app/controllers/mix_controller.dart';
 import 'package:mix_player_app/controllers/playback_controller.dart';
 import 'package:mix_player_app/models/api_models.dart';
+import "package:mix_player_app/models/audio_transport_diagnostics.dart";
 import 'package:mix_player_app/services/app_settings.dart';
+import "package:mix_player_app/services/error_report.dart";
 import 'package:mix_player_app/services/playback_engines.dart';
 import 'support/fakes.dart';
 
@@ -68,6 +71,7 @@ void main() {
     ]);
     expect(playback.isPlaying, isTrue);
     expect(playback.upcomingCount, 2);
+    expect(audio.resetCount, 0);
     audio.advance(1);
     await drain();
     expect(playback.currentIndex, 1);
@@ -196,7 +200,7 @@ void main() {
     expect(audio.playing, isTrue);
   });
   test(
-    'List taps and previous reuse the loaded queue and reset time',
+    'List taps reuse the queue and previous reconstructs a retired source',
     () async {
       await playback.playTrack(0);
       await drain();
@@ -211,8 +215,8 @@ void main() {
       expect(playback.currentIndex, 0);
       expect(playback.position, Duration.zero);
       expect(resolutions.where((id) => id == 'a'), hasLength(1));
-      expect(audio.loadCount, 1);
-      expect(audio.stopCount, 1);
+      expect(audio.loadCount, 2);
+      expect(audio.stopCount, 2);
       expect(audio.entries.first.httpHeaders['User-Agent'], 'audio-a');
     },
   );
@@ -255,12 +259,12 @@ void main() {
       await playback.playTrack(0);
       await drain();
       await playback.playTrack(1);
-      audio.errorEvents.add('Cached source rejected');
+      audio.emitError('Cached source rejected');
       await drain();
       expect(resolutions.where((id) => id == 'b'), hasLength(2));
       expect(playback.error, isNull);
       expect(playback.currentIndex, 1);
-      audio.errorEvents.add('Fresh source rejected');
+      audio.emitError('Fresh source rejected');
       await drain();
       expect(resolutions.where((id) => id == 'b'), hasLength(2));
       expect(playback.error, 'Fresh source rejected');
@@ -279,6 +283,291 @@ void main() {
     expect(resolutions.where((id) => id == 'a'), hasLength(2));
     expect(playback.error, isNull);
     expect(audio.playing, isTrue);
+  });
+  test("A newly resolved source can recover after a long pause", () async {
+    await playback.playTrack(0);
+    await drain();
+    await playback.togglePlay();
+    // URLの通常の有効期間を越える一時停止を時計だけ進めて再現する。
+    const pauseBeyondStreamLifetime = Duration(hours: 7);
+    now = now.add(pauseBeyondStreamLifetime);
+
+    audio.emitError("Source expired while paused");
+    await drain();
+
+    expect(resolutions.where((id) => id == "a"), hasLength(2));
+    expect(audio.loadCount, 2);
+    expect(audio.stopCount, 2);
+    expect(audio.resetCount, 1);
+    expect(playback.currentIndex, 0);
+    expect(playback.error, isNull);
+    expect(playback.isPlaying, isTrue);
+
+    audio.emitError("Replacement rejected");
+    await drain();
+    expect(resolutions.where((id) => id == "a"), hasLength(2));
+    expect(playback.error, "Replacement rejected");
+    expect(playback.isPlaying, isFalse);
+    expect(audio.resetCount, 1);
+  });
+  test("A newly resolved source load failure retries only once", () async {
+    audio.onLoad = (entry) => throw StateError("Media load rejected");
+
+    await playback.playTrack(0);
+    await drain();
+
+    expect(resolutions, ["a", "a"]);
+    expect(audio.loadCount, 2);
+    expect(audio.resetCount, 1);
+    expect(playback.error, isNotNull);
+    expect(playback.isBusy, isFalse);
+    expect(playback.isPlaying, isFalse);
+    expect(mix.api.cachedMedia("a", PlaybackMode.audio), isNull);
+
+    // Retry through the playback button, without restarting or reloading Mix.
+    audio.onLoad = null;
+    await playback.togglePlay();
+    await drain();
+    expect(resolutions.where((id) => id == "a"), hasLength(3));
+    expect(playback.currentIndex, 0);
+    expect(playback.error, isNull);
+    expect(playback.isPlaying, isTrue);
+    expect(audio.resetCount, 2);
+  });
+  test(
+    "A broken transport is reset before loading the refreshed URL",
+    () async {
+      var broken = false;
+      audio.onLoad = (entry) {
+        if (broken) throw PlayerException(-1004, "Connection refused", 0);
+      };
+      audio.onReset = () => broken = false;
+      await playback.playTrack(0);
+      await drain();
+      await playback.pauseVideoForBackground();
+      playback.resumeForeground();
+      expect(audio.resetCount, 0);
+      broken = true;
+      audio.emitError("Connection refused");
+      await drain();
+      expect(audio.resetCount, 1);
+      expect(playback.error, isNull);
+      expect(playback.isPlaying, isTrue);
+      expect(playback.currentIndex, 0);
+      expect(resolutions.where((videoId) => videoId == "a"), hasLength(2));
+    },
+  );
+  test(
+    "Reset failure is bounded and recorded instead of loading a stale URL",
+    () async {
+      await playback.playTrack(0);
+      await drain();
+      audio.onReset = () => throw StateError("private connection data");
+      audio.emitError("Connection refused");
+      await drain();
+      expect(audio.resetCount, 1);
+      expect(audio.loadCount, 1);
+      expect(playback.isPlaying, isFalse);
+      final report = playback.errorReport!;
+      expect(report.transport!.reset, TransportResetState.failed);
+      expect(report.toText(), isNot(contains("private")));
+      audio.emitError("Duplicate failure");
+      await drain();
+      expect(audio.resetCount, 1);
+      audio.onReset = null;
+      await playback.togglePlay();
+      await drain();
+      expect(audio.resetCount, 2);
+      expect(playback.isPlaying, isTrue);
+    },
+  );
+  for (final stopDuringReset in [false, true]) {
+    test(
+      "Stop/selection during reset cannot autoplay the old track ($stopDuringReset)",
+      () async {
+        await playback.playTrack(0);
+        await drain();
+        final reset = Completer<void>();
+        audio.onReset = () => reset.future;
+        audio.emitError("Connection refused");
+        await drain();
+        expect(audio.resetCount, 1);
+        final selecting =
+            stopDuringReset ? playback.stop() : playback.playTrack(3);
+        reset.complete();
+        await selecting;
+        await drain();
+        if (stopDuringReset) {
+          expect(playback.currentTrack, isNull);
+          expect(audio.entries, isEmpty);
+          expect(audio.loadCount, 1);
+          expect(playback.isPlaying, isFalse);
+        } else {
+          expect(playback.currentIndex, 3);
+          expect(audio.entries.first.track.videoId, "d");
+          expect(audio.loadCount, 2);
+          expect(playback.isPlaying, isTrue);
+        }
+      },
+    );
+  }
+  test("Late native events cannot revive a failed playback", () async {
+    await playback.playTrack(0);
+    await drain();
+    audio.emitError("Initial failure");
+    await drain();
+    audio.emitError("Retry failed");
+    await drain();
+
+    audio.stateEvents.add(const AudioStatus(true, AudioPhase.ready));
+    audio.advance(1);
+    audio.stateEvents.add(const AudioStatus(true, AudioPhase.completed));
+    await drain();
+
+    expect(playback.isPlaying, isFalse);
+    expect(playback.currentIndex, 0);
+    expect(playback.error, "Retry failed");
+    expect(resolutions.where((id) => id == "a"), hasLength(2));
+
+    await playback.togglePlay();
+    await drain();
+    expect(resolutions.where((id) => id == "a"), hasLength(3));
+    expect(playback.currentIndex, 0);
+    expect(playback.isPlaying, isTrue);
+    expect(playback.error, isNull);
+  });
+  test("Stopping during automatic recovery prevents late autoplay", () async {
+    await playback.playTrack(0);
+    await drain();
+    final response = Completer<http.Response>();
+    resolveOverride = (id) => response.future;
+    audio.emitError("Media expired");
+    await drain();
+    expect(playback.isResolvingUrl, isTrue);
+
+    await playback.stop();
+    response.complete(jsonResponse(streamJson("a")));
+    await drain();
+
+    expect(audio.loadCount, 1);
+    expect(playback.currentTrack, isNull);
+    expect(playback.isPlaying, isFalse);
+    expect(playback.isBusy, isFalse);
+    expect(audio.entries, isEmpty);
+  });
+  test("Reloading Mix after failure does not reuse the rejected URL", () async {
+    audio.onLoad = (entry) => throw StateError("Media rejected");
+    await playback.playTrack(0);
+    await drain();
+    expect(resolutions, ["a", "a"]);
+
+    audio.onLoad = null;
+    resolveOverride = (id) {
+      final json = streamJson(id);
+      json["audio"] = {
+        "url": "https://media.example.test/$id-fresh.m4a",
+        "http_headers": {"User-Agent": "fresh-agent"},
+      };
+      return jsonResponse(json);
+    };
+    await mix.load(defaultMixUrl);
+    await drain();
+    await playback.playTrack(0);
+    await drain();
+
+    expect(resolutions.where((id) => id == "a"), hasLength(3));
+    expect(audio.entries.first.uri.path, "/a-fresh.m4a");
+    expect(audio.entries.first.httpHeaders, {"User-Agent": "fresh-agent"});
+    expect(playback.error, isNull);
+    expect(playback.isPlaying, isTrue);
+  });
+  test(
+    "Loading failures keep native details after automatic refresh",
+    () async {
+      audio.onLoad =
+          (entry) =>
+              throw PlayerException(
+                -1009,
+                "https://private.example/media?token=private-token",
+                0,
+              );
+      await playback.playTrack(0);
+      await drain();
+
+      final report = playback.errorReport!;
+      expect(report.operation, "音声の読み込み");
+      expect(report.details.nativeCode, -1009);
+      expect(report.details.sourceIndex, 0);
+      expect(report.refreshed, isTrue);
+      expect(report.playback!.listIndex, 0);
+      expect(report.uptime, isNotNull);
+      expect(report.toText(), isNot(contains("private")));
+      expect(audio.loadCount, 2);
+
+      await playback.stop();
+      expect(playback.errorReport, isNull);
+    },
+  );
+  test(
+    "Playback errors capture a snapshot before later player events",
+    () async {
+      await playback.playTrack(0);
+      await drain();
+      audio.emitError("Initial failure");
+      await drain();
+      const failurePosition = Duration(seconds: 37);
+      audio.positionEvents.add(failurePosition);
+      audio.emitError(
+        "音声を再生できません。",
+        details: const FailureDetails(
+          type: "PlayerException",
+          nativeCode: -11800,
+          sourceIndex: 0,
+        ),
+      );
+      final report = playback.errorReport!;
+      final textAtFailure = report.toText();
+      expect(report.playback!.mediaPosition, failurePosition);
+      expect(report.refreshed, isTrue);
+
+      audio.advance(1);
+      audio.positionEvents.add(Duration.zero);
+      audio.emitError("Duplicate failure");
+      await drain();
+      expect(playback.errorReport, same(report));
+      expect(report.toText(), textAtFailure);
+
+      await playback.togglePlay();
+      expect(playback.errorReport, isNull);
+      expect(playback.isPlaying, isTrue);
+    },
+  );
+  test("Stream API failures retain the HTTP status in their report", () async {
+    resolveOverride = (id) => http.Response("private-response", 503);
+    await playback.playTrack(0);
+    final report = playback.errorReport!;
+
+    expect(report.details.httpStatusCode, 503);
+    expect(report.apiTiming!.succeeded, isFalse);
+    expect(report.apiTiming!.statusCode, 503);
+    expect(report.toText(), isNot(contains("private-response")));
+  });
+  test("Video reports preserve the original failure snapshot", () async {
+    await playback.setMode(PlaybackMode.video);
+    await playback.playTrack(0);
+    const failedStatus = VideoStatus(
+      hasError: true,
+      position: Duration(seconds: 37),
+      failure: FailureDetails(type: "PlatformException", nativeCode: -11800),
+    );
+    videos.single.emit(failedStatus);
+    final report = playback.errorReport!;
+    expect(report.details.nativeCode, -11800);
+    expect(report.playback!.mediaPosition, failedStatus.position);
+
+    videos.single.emit(const VideoStatus(hasError: true));
+    expect(playback.errorReport, same(report));
+    expect(report.playback!.mediaPosition, failedStatus.position);
   });
   test(
     'Automatic advance during append updates the current track and timing',
@@ -330,17 +619,18 @@ void main() {
     },
   );
   test(
-    'Prefetch skips failures and preserves the original list index',
+    'A permanent prefetch failure holds the same next track without skipping',
     () async {
       resolveOverride =
           (id) =>
               id == 'b' ? http.Response('', 403) : jsonResponse(streamJson(id));
       await playback.playTrack(0);
       await drain();
-      expect(audio.entries.map((e) => e.track.videoId), ['a', 'c', 'd']);
-      audio.advance(1);
-      expect(playback.currentIndex, 2);
-      expect(playback.error, contains('スキップ'));
+      expect(audio.entries.map((entry) => entry.track.videoId), ['a']);
+      expect(playback.currentIndex, 0);
+      expect(playback.isPlaying, isTrue);
+      expect(playback.error, contains('認証'));
+      expect(resolutions, ['a', 'b', 'c']);
     },
   );
   test('Tail extension runs once at unchanged length', () async {

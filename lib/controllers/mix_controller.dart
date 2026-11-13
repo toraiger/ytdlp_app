@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 
 import '../models/api_models.dart';
 import '../services/api_client.dart';
+import "../services/error_report.dart";
 
 class MixController extends ChangeNotifier {
   ApiClient? _api;
@@ -12,6 +13,7 @@ class MixController extends ChangeNotifier {
   bool isLoading = false;
   bool isExtending = false;
   String? error;
+  ErrorReport? errorReport;
   int? lastExtensionAdded;
 
   List<MixTrack> get items => List.unmodifiable(_items);
@@ -25,6 +27,21 @@ class MixController extends ChangeNotifier {
 
   ApiClient get api => _api ?? (throw const ApiFailure('API サーバー設定を保存してください。'));
 
+  void _recordError(String message, String operation, {Object? failure}) {
+    error = message;
+    errorReport = ErrorReport.capture(
+      operation: operation,
+      message: message,
+      failure: failure,
+      apiTiming: _api?.lastTiming.value,
+    );
+  }
+
+  void _clearError() {
+    error = null;
+    errorReport = null;
+  }
+
   void configure(ApiClient client) {
     _generation++;
     _api?.close();
@@ -33,7 +50,7 @@ class MixController extends ChangeNotifier {
     _items = [];
     isLoading = false;
     isExtending = false;
-    error = null;
+    _clearError();
     lastExtensionAdded = null;
     notifyListeners();
   }
@@ -50,14 +67,17 @@ class MixController extends ChangeNotifier {
           'music.youtube.com',
         }.contains(uri.host) ||
         (uri.queryParameters['list'] ?? '').isEmpty) {
-      error = 'list パラメーターを含む HTTPS の YouTube Mix URL を入力してください。';
+      _recordError(
+        "list パラメーターを含む HTTPS の YouTube Mix URL を入力してください。",
+        "Mix URLの確認",
+      );
       notifyListeners();
       return false;
     }
     final generation = ++_generation;
     isLoading = true;
     isExtending = false;
-    error = null;
+    _clearError();
     lastExtensionAdded = null;
     notifyListeners();
     try {
@@ -69,8 +89,10 @@ class MixController extends ChangeNotifier {
       _session = result;
       _items = mergeTracks([], result.items);
       return true;
-    } catch (e) {
-      if (_isCurrent(generation)) error = describeFailure(e);
+    } catch (failure) {
+      if (_isCurrent(generation)) {
+        _recordError(describeFailure(failure), "Mix取得", failure: failure);
+      }
       return false;
     } finally {
       if (_isCurrent(generation)) {
@@ -85,7 +107,7 @@ class MixController extends ChangeNotifier {
     final generation = _generation;
     final session = _session!;
     isExtending = true;
-    error = null;
+    _clearError();
     notifyListeners();
     try {
       final result = await api.extendMix(session.sessionId);
@@ -96,8 +118,10 @@ class MixController extends ChangeNotifier {
       _session = result;
       lastExtensionAdded = added;
       return added;
-    } catch (e) {
-      if (_isCurrent(generation)) error = describeFailure(e);
+    } catch (failure) {
+      if (_isCurrent(generation)) {
+        _recordError(describeFailure(failure), "曲の追加取得", failure: failure);
+      }
       return 0;
     } finally {
       if (_isCurrent(generation)) {

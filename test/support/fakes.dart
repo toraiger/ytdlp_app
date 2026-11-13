@@ -3,8 +3,11 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:mix_player_app/services/api_client.dart';
+import "package:mix_player_app/models/audio_transport_diagnostics.dart";
 import 'package:mix_player_app/services/app_settings.dart';
+import "package:mix_player_app/services/error_report.dart";
 import 'package:mix_player_app/services/playback_engines.dart';
+import "package:mix_player_app/models/prefetch_diagnostics.dart";
 import 'package:video_player/video_player.dart';
 
 Map<String, dynamic> trackJson(String id) => {
@@ -75,10 +78,25 @@ class FakeAudioEngine implements AudioEngine {
   final positionEvents = StreamController<Duration>.broadcast(sync: true);
   final durationEvents = StreamController<Duration?>.broadcast(sync: true);
   final indexEvents = StreamController<int?>.broadcast(sync: true);
-  final errorEvents = StreamController<String>.broadcast(sync: true);
+  final errorEvents = StreamController<MediaFailure>.broadcast(sync: true);
+  final preparationEvents = StreamController<AudioPreparationEvent>.broadcast(
+    sync: true,
+  );
+  final prepared = <FakeAudioPreparation>[];
+  final replacements = <QueueEntry>[];
+  final held = <QueueEntry>{};
+  FutureOr<void> Function(QueueEntry entry)? onPrepare;
+  FutureOr<void> Function(QueueEntry entry)? onReplace;
+  bool automaticallyReady = true;
+  int rotations = 0;
   final entries = <QueueEntry>[];
   int loadCount = 0;
   int stopCount = 0;
+  int resetCount = 0;
+  FutureOr<void> Function()? onReset;
+  @override
+  AudioTransportDiagnostics transportDiagnostics =
+      const AudioTransportDiagnostics();
   Duration? lastSeek;
   bool playing = false;
   FutureOr<void> Function(QueueEntry entry)? onAppend;
@@ -101,7 +119,82 @@ class FakeAudioEngine implements AudioEngine {
   @override
   Stream<int?> get indexes => indexEvents.stream;
   @override
-  Stream<String> get errors => errorEvents.stream;
+  Stream<MediaFailure> get errors => errorEvents.stream;
+  @override
+  Stream<AudioPreparationEvent> get preparations => preparationEvents.stream;
+  @override
+  AudioPreparation prepare(QueueEntry entry, {required int networkGeneration}) {
+    final preparation = FakeAudioPreparation(
+      entry,
+      networkGeneration,
+      Future.sync(() => onPrepare?.call(entry)),
+    );
+    prepared.add(preparation);
+    return preparation;
+  }
+
+  @override
+  Future<bool> installUpcoming(
+    AudioPreparation preparation, {
+    QueueEntry? replacing,
+  }) async {
+    final source = preparation as FakeAudioPreparation;
+    if (source.cancelled) return false;
+    if (replacing == null) {
+      await append(source.entry);
+    } else {
+      await onReplace?.call(source.entry);
+      final index = entries.indexOf(replacing);
+      if (index <= (_index ?? 0)) return false;
+      entries[index] = source.entry;
+      replacements.add(source.entry);
+      held.remove(replacing);
+    }
+    if (automaticallyReady) emitPrepared(source);
+    return true;
+  }
+
+  void emitPrepared(
+    FakeAudioPreparation preparation, {
+    AudioPreparationFailure? failure,
+  }) {
+    preparationEvents.add(
+      AudioPreparationEvent(
+        preparation.entry,
+        preparation.networkGeneration,
+        failure == null ? PrefetchStage.ready : PrefetchStage.failed,
+        failure: failure,
+      ),
+    );
+  }
+
+  @override
+  Future<void> holdUpcoming(
+    List<QueueEntry> entries, {
+    bool rotateTransport = false,
+  }) async {
+    held.addAll(entries);
+    if (rotateTransport) rotations++;
+  }
+
+  @override
+  Future<bool> retireBefore(int index) async {
+    if (index <= 0 || _index != index) return false;
+    entries.removeRange(0, index);
+    _index = 0;
+    indexEvents.add(0);
+    return true;
+  }
+
+  void emitError(String message, {FailureDetails? details}) {
+    errorEvents.add(
+      MediaFailure(
+        message,
+        details: details ?? const FailureDetails(type: "AudioError"),
+      ),
+    );
+  }
+
   @override
   Future<void> load(QueueEntry entry) async {
     loadCount++;
@@ -150,6 +243,23 @@ class FakeAudioEngine implements AudioEngine {
   }
 
   @override
+  Future<void> resetTransport() async {
+    resetCount++;
+    try {
+      await stop();
+      await onReset?.call();
+      transportDiagnostics = const AudioTransportDiagnostics(
+        reset: TransportResetState.completed,
+      );
+    } catch (failure) {
+      transportDiagnostics = const AudioTransportDiagnostics(
+        reset: TransportResetState.failed,
+      );
+      rethrow;
+    }
+  }
+
+  @override
   Future<void> seek(Duration position, {int? index}) async {
     final callback = onSeek;
     if (callback != null) await callback(index);
@@ -177,8 +287,23 @@ class FakeAudioEngine implements AudioEngine {
       durationEvents.close(),
       indexEvents.close(),
       errorEvents.close(),
+      preparationEvents.close(),
     ]);
   }
+}
+
+class FakeAudioPreparation implements AudioPreparation {
+  FakeAudioPreparation(this.entry, this.networkGeneration, this.ready);
+  @override
+  final QueueEntry entry;
+  final int networkGeneration;
+  @override
+  final Future<void> ready;
+  @override
+  bool get mediaReady => true;
+  bool cancelled = false;
+  @override
+  void cancel() => cancelled = true;
 }
 
 class FakeVideoEngine implements VideoEngine {

@@ -15,6 +15,9 @@ import 'package:rxdart/rxdart.dart';
 import 'package:synchronized/synchronized.dart';
 import 'package:uuid/uuid.dart';
 
+import "src/local_proxy_server.dart";
+export "src/local_proxy_server.dart" show LocalProxySnapshot;
+
 const _uuid = Uuid();
 
 JustAudioPlatform? _pluginPlatformCache;
@@ -114,7 +117,9 @@ class AudioPlayer {
   StreamSubscription<void>? _errorsResetSubscription;
 
   String? _id;
-  final _proxy = _ProxyHttpServer();
+  var _proxy = _ProxyHttpServer();
+  final _retiredProxies = <_ProxyHttpServer>[];
+  int _proxyEpoch = 0;
   // ignore: deprecated_member_use_from_same_package
   final ConcatenatingAudioSource _playlist;
   final Map<String, AudioSource> _audioSources = {};
@@ -950,6 +955,46 @@ class AudioPlayer {
   Future<void> removeAudioSourceRange(int start, int end) =>
       _playlist.removeRange(start, end);
 
+  /// Atomically replace a future Darwin item. The native identity guard wins
+  /// over a delayed Dart index notification when an item advances concurrently.
+  Future<bool> replaceUpcomingAudioSource(int index, AudioSource source) =>
+      _playlist._replaceUpcoming(index, source);
+
+  Future<bool> retirePlayedAudioSources(int count) => _playlist._retirePlayed(count);
+
+  Future<List<String>> holdUpcomingAudioSources(List<AudioSource> sources) async {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS || !_active) return [];
+    return await const MethodChannel("com.ryanheise.just_audio.methods")
+        .invokeListMethod<String>("mixHoldUpcoming", {
+      "playerId": _id,
+      "sourceIds": sources.map((source) => source._id).toList(),
+    }) ?? [];
+  }
+
+  String sourceIdentity(AudioSource source) => source._id;
+
+  /// New items get a fresh listener; routes used by the current item survive.
+  void rotateLocalProxy() {
+    if (_proxy.isEmpty) {
+      unawaited(_proxy.stop().catchError((Object ignored) {}));
+    } else {
+      _retiredProxies.add(_proxy);
+    }
+    _proxy = _ProxyHttpServer();
+    _proxyEpoch++;
+  }
+
+  Future<void> releaseLocalSource(AudioSource source) async {
+    for (final proxy in [_proxy, ..._retiredProxies]) {
+      proxy.release(source);
+      if (proxy != _proxy && proxy.isEmpty) {
+        await proxy.stop();
+        _retiredProxies.remove(proxy);
+      }
+    }
+    _audioSources.remove(source._id);
+  }
+
   /// Moves the [AudioSource] in the playlist at [currentIndex] to [newIndex].
   Future<void> moveAudioSource(int currentIndex, int newIndex) =>
       _playlist.move(currentIndex, newIndex);
@@ -1173,6 +1218,24 @@ class AudioPlayer {
     _playerEventSubject.add(playerEvent.copyWith(playing: false));
     await future;
   }
+
+  /// Rebuilds the local stream transport on the next load. Stop first so native
+  /// items cannot continue using URLs from the listener being closed.
+  Future<void> resetLocalProxy() async {
+    if (_disposed) return;
+    if (_active) throw StateError("Stop playback before resetting its proxy");
+    await _proxy.stop();
+    for (final proxy in _retiredProxies.toList()) {
+      await proxy.stop();
+    }
+    _retiredProxies.clear();
+  }
+
+  LocalProxySnapshot get localProxySnapshot => LocalProxySnapshot(
+    generation: _proxyEpoch + _proxy.snapshot.generation,
+    listening: _proxy.snapshot.listening,
+    requestCount: _proxy.snapshot.requestCount,
+  );
 
   /// Sets the volume of this player, where 1.0 is normal volume.
   Future<void> setVolume(final double volume) async {
@@ -1423,7 +1486,11 @@ class AudioPlayer {
         s._dispose();
       }
       _audioSources.clear();
-      _proxy.stop();
+      await _proxy.stop();
+      for (final proxy in _retiredProxies.toList()) {
+        await proxy.stop();
+      }
+      _retiredProxies.clear();
       await _playerDataSubscription?.cancel();
       await _playbackEventSubscription?.cancel();
       await _androidAudioAttributesSubscription?.cancel();
@@ -2461,18 +2528,26 @@ class AndroidExtractorOptions {
 
 /// A local proxy HTTP server for making remote GET requests with headers.
 class _ProxyHttpServer {
-  late HttpServer _server;
-  bool _running = false;
+  final _listener = LocalProxyServer();
+  Future<void>? _resetting;
 
   /// Maps request keys to [_ProxyHandler]s.
   final Map<String, _ProxyHandler> _handlerMap = {};
+  final Map<String, String> _sourceRoutes = {};
+  bool get isEmpty => _handlerMap.isEmpty;
+
+  void release(AudioSource source) {
+    final key = _sourceRoutes.remove(source._id);
+    if (key != null) _handlerMap.remove(key);
+  }
 
   /// The port this server is bound to on localhost. This is set only after
-  /// [start] has completed.
-  int get port => _server.port;
+  /// [ensureRunning] has completed.
+  int get port => _listener.port;
+  LocalProxySnapshot get snapshot => _listener.snapshot;
 
   /// Registers a [UriAudioSource] to be served through this proxy. This may be
-  /// called only after [start] has completed.
+  /// called only after [ensureRunning] has completed.
   Uri addUriAudioSource(UriAudioSource source) {
     final uri = source.uri;
     final headers = <String, String>{};
@@ -2480,6 +2555,7 @@ class _ProxyHttpServer {
       headers.addAll(source.headers!.cast<String, String>());
     }
     final path = _requestKey(uri);
+    _sourceRoutes[source._id] = path;
     _handlerMap[path] = _proxyHandlerForUri(
       uri,
       headers: headers,
@@ -2493,10 +2569,11 @@ class _ProxyHttpServer {
   }
 
   /// Registers a [StreamAudioSource] to be served through this proxy. This may
-  /// be called only after [start] has completed.
+  /// be called only after [ensureRunning] has completed.
   Uri addStreamAudioSource(StreamAudioSource source) {
     final uri = _sourceUri(source);
     final path = _requestKey(uri);
+    _sourceRoutes[source._id] = path;
     _handlerMap[path] = _proxyHandlerForSource(source);
     return uri;
   }
@@ -2511,33 +2588,37 @@ class _ProxyHttpServer {
   String _requestKey(Uri uri) => '${uri.path}?${uri.query}';
 
   /// Starts the server if it is not already running.
-  Future<dynamic> ensureRunning() async {
-    if (_running) return;
-    return await start();
+  Future<void> ensureRunning() async {
+    await _resetting;
+    await _listener.ensureRunning(_handle);
   }
 
-  /// Starts the server.
-  Future<dynamic> start() async {
-    _running = true;
-    _server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-    _server.listen((request) async {
-      if (request.method == 'GET') {
-        final uriPath = _requestKey(request.uri);
-        final handler = _handlerMap[uriPath]!;
-        handler(this, request);
-      }
-    }, onDone: () {
-      _running = false;
-    }, onError: (Object e, StackTrace st) {
-      _running = false;
-    });
+  Future<void> _handle(HttpRequest request) async {
+    if (request.method != "GET") {
+      request.response.statusCode = HttpStatus.methodNotAllowed;
+      await request.response.close();
+      return;
+    }
+    final handler = _handlerMap[_requestKey(request.uri)];
+    if (handler == null) {
+      request.response.statusCode = HttpStatus.notFound;
+      await request.response.close();
+      return;
+    }
+    await handler(this, request);
   }
 
-  /// Stops the server
-  Future<dynamic> stop() async {
-    if (!_running) return;
-    _running = false;
-    return await _server.close();
+  /// Await shutdown before releasing routes, including sources/headers they own.
+  Future<void> stop() => _resetting ??= _stopAndClear();
+
+  Future<void> _stopAndClear() async {
+    try {
+      await _listener.stop();
+    } finally {
+      _handlerMap.clear();
+      _sourceRoutes.clear();
+      _resetting = null;
+    }
   }
 }
 
@@ -3080,6 +3161,77 @@ class ConcatenatingAudioSource extends AudioSource {
                 children: children.map((child) => child._toMessage()).toList(),
                 shuffleOrder: List.of(_shuffleOrder.indices)));
       }
+    });
+  }
+
+  Future<bool> _replaceUpcoming(int index, AudioSource replacement) {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) {
+      return (() async {
+        final player = _player;
+        if (player == null || index <= (player.currentIndex ?? 0) ||
+            index >= children.length) return false;
+        await player.insertAudioSource(index + 1, replacement);
+        if (index <= (player.currentIndex ?? 0)) {
+          await player.removeAudioSourceAt(index + 1);
+          return false;
+        }
+        await player.removeAudioSourceAt(index);
+        return true;
+      })();
+    }
+    return _lock.synchronized(() async {
+      final player = _player;
+      if (player == null || index <= (player.currentIndex ?? 0) ||
+          index >= children.length) {
+        return false;
+      }
+      final previous = children[index];
+      replacement._onAttach(player);
+      if (player._active) await replacement._onLoad();
+      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
+        final applied = await const MethodChannel("com.ryanheise.just_audio.methods")
+            .invokeMethod<bool>("mixReplaceUpcoming", {
+          "playerId": player._id,
+          "playlistId": _id,
+          "sourceId": previous._id,
+          "index": index,
+          "source": replacement._toMessage().toMap(),
+          "shuffleOrder": List.of(_shuffleOrder.indices),
+        });
+        if (applied != true) return false;
+        children[index] = replacement;
+        await player._broadcastSequence();
+        // Also update the background handler's playlist and lock-screen queue.
+        await (await player._platform).setShuffleOrder(
+            SetShuffleOrderRequest(audioSourceMessage: _toMessage()));
+      }
+      return true;
+    });
+  }
+
+  Future<bool> _retirePlayed(int count) {
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) {
+      return removeRange(0, count).then((ignored) => true);
+    }
+    return _lock.synchronized(() async {
+      final player = _player;
+      if (player == null || count <= 0 || count >= children.length) return false;
+      final nextOrder = DefaultShuffleOrder()..insert(0, children.length - count);
+      final applied = await const MethodChannel("com.ryanheise.just_audio.methods")
+          .invokeMethod<bool>("mixRetirePlayed", {
+        "playerId": player._id,
+        "playlistId": _id,
+        "count": count,
+        "currentSourceId": children[count]._id,
+        "shuffleOrder": nextOrder.indices,
+      });
+      if (applied != true) return false;
+      children.removeRange(0, count);
+      _shuffleOrder = nextOrder;
+      await player._broadcastSequence();
+      await (await player._platform).setShuffleOrder(
+          SetShuffleOrderRequest(audioSourceMessage: _toMessage()));
+      return true;
     });
   }
 
@@ -3745,7 +3897,7 @@ class _StreamingByteRangeRequest {
 }
 
 /// The type of functions that can handle HTTP requests sent to the proxy.
-typedef _ProxyHandler = void Function(
+typedef _ProxyHandler = Future<void> Function(
     _ProxyHttpServer server, HttpRequest request);
 
 /// A proxy handler for serving audio from a [StreamAudioSource].

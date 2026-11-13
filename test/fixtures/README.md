@@ -7,3 +7,9 @@ declare the complete duration, matching the structural defect observed in the
 submitted format-140 M4A. Fragment sample tables and media bytes are untouched.
 
 The production header normalizer creates the corrected fixture during CI.
+
+`scripts/prepare_m4a_fixtures.dart` uses the shared test helper to add single-entry
+version-0/version-1 edit lists, zero/nonzero starts, and a distinct movie clock.
+The generated variants retain the original AAC bytes and relative fragment
+addresses. AVFoundation checks every variant over local files and HTTP, plus
+seeking and a three-item queue. No uploaded user media is included.

@@ -21,6 +21,22 @@ Local changes:
   URL uses `localhost`, matching the app's narrowly scoped ATS exception.
 - Stream-proxy cancellation completes on disconnect/error as well as EOF,
   cancelling the upstream subscription when native seeks or reloads close it.
+- The loopback listener shares pending starts and awaits forced shutdown. Bind
+  failure and an old listener's completion cannot leave stale running state.
+  Unknown routes return 404 and unsupported methods return 405.
+- `AudioPlayer.resetLocalProxy()` can be called after stopping playback to drop
+  old routes and rebind on the next load, preserving the one-player background
+  service. `localProxySnapshot` exposes only generation/count/listening values.
+- The preparation event channel reports ready/failed items by source identity,
+  including future items. Future failures hold the intended successor without
+  emitting a fatal error for the active item or skipping to a later song.
+- The iOS `mixHoldUpcoming`, `mixReplaceUpcoming` and `mixRetirePlayed` methods
+  verify native item identity on the main thread. They preserve the current
+  decoder when Dart index events arrive late. Dart and the background handler's
+  playlist are synchronized after a successful guarded mutation.
+- `rotateLocalProxy()` assigns fresh routes to new sources while keeping active
+  routes alive. Replaced/played sources release their routes; a retired listener
+  closes when its last source is released. Stop/reset/dispose close all listeners.
 
 The shared policy is in `MixAudioTimeline.h/.m`; the Objective-C tests in the
 application's `test/native` exercise that same production code on macOS CI.

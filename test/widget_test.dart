@@ -6,9 +6,12 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:mix_player_app/models/native_playback_timing.dart';
+import "package:mix_player_app/models/audio_transport_diagnostics.dart";
 import 'package:mix_player_app/player_app.dart';
 import 'package:mix_player_app/services/app_settings.dart';
-import 'package:mix_player_app/services/playback_engines.dart';
+import "package:mix_player_app/services/error_report.dart";
+import "package:mix_player_app/widgets/error_copy_button.dart";
+import "package:mix_player_app/services/playback_engines.dart";
 import 'support/fakes.dart';
 
 void main() {
@@ -16,6 +19,7 @@ void main() {
     WidgetTester tester,
     MemorySettings settings, {
     FakeAudioEngine? audio,
+    FutureOr<http.Response> Function(http.Request)? handler,
     Map<String, dynamic> Function(String)? streamResponse,
   }) async {
     await tester.pumpWidget(
@@ -23,15 +27,51 @@ void main() {
         settings: settings,
         audioEngine: audio ?? FakeAudioEngine(),
         apiFactory:
-            (_, __) => mockApi((request) {
-              if (request.url.path == '/stream') {
-                final id = jsonDecode(request.body)['video_id'] as String;
-                return jsonResponse((streamResponse ?? streamJson)(id));
-              }
-              return jsonResponse(mixJson(['a', 'b']));
-            }),
+            (serverUrl, apiKey) => mockApi(
+              handler ??
+                  (request) {
+                    if (request.url.path == "/stream") {
+                      final videoId =
+                          jsonDecode(request.body)["video_id"] as String;
+                      return jsonResponse(
+                        (streamResponse ?? streamJson)(videoId),
+                      );
+                    }
+                    return jsonResponse(mixJson(["a", "b"]));
+                  },
+            ),
       ),
     );
+    await tester.pumpAndSettle();
+  }
+
+  void captureClipboard(
+    WidgetTester tester,
+    void Function(String) onCopy, {
+    bool unavailable = false,
+  }) {
+    tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      SystemChannels.platform,
+      (call) async {
+        if (call.method == "Clipboard.setData") {
+          if (unavailable) throw PlatformException(code: "unavailable");
+          onCopy((call.arguments as Map)["text"] as String);
+        }
+        return null;
+      },
+    );
+    addTearDown(() {
+      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        SystemChannels.platform,
+        null,
+      );
+    });
+  }
+
+  Future<void> tapVisible(WidgetTester tester, Finder finder) async {
+    await tester.ensureVisible(finder);
+    await tester.pumpAndSettle();
+    await tester.tap(finder);
     await tester.pumpAndSettle();
   }
 
@@ -270,7 +310,8 @@ void main() {
       await interrupted.up();
       await tester.pumpAndSettle();
       expect(seeks, 0);
-      expect(audio.snapshot.index, 1);
+      expect(audio.snapshot.index, 0);
+      expect(audio.entries.first.track.videoId, "b");
       expect(tester.widget<Slider>(slider).value, 0);
       expect(tester.takeException(), isNull);
     },
@@ -279,21 +320,7 @@ void main() {
     'Playback report refreshes native timing and keeps all sources free of secrets',
     (tester) async {
       String? copied;
-      tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-        SystemChannels.platform,
-        (call) async {
-          if (call.method == 'Clipboard.setData') {
-            copied = (call.arguments as Map)['text'] as String;
-          }
-          return null;
-        },
-      );
-      addTearDown(() {
-        tester.binding.defaultBinaryMessenger.setMockMethodCallHandler(
-          SystemChannels.platform,
-          null,
-        );
-      });
+      captureClipboard(tester, (text) => copied = text);
       final audio = _DiagnosticAudioEngine();
       final settings =
           MemorySettings()
@@ -349,6 +376,10 @@ void main() {
       expect(copied, contains('項目の長さ: 03:57.000 / 音源の長さ: 03:57.000'));
       expect(copied, contains('シーク範囲の開始: 00:00.000 / 長さ: 07:53.000'));
       expect(copied, contains('長さの取得元: 曲データ'));
+      expect(copied, contains("M4A初期ヘッダーの正規化: 3か所"));
+      expect(copied, contains("M4A判定: 適用済み"));
+      expect(copied, contains("編集リスト: あり"));
+      expect(copied, contains("編集開始位置: 00:00.036 / 区間の長さ: 03:57.000"));
       expect(copied, isNot(contains('do-not-copy-video-id')));
       expect(copied, isNot(contains('do-not-copy-api-key')));
       expect(copied, isNot(contains('https://')));
@@ -356,6 +387,119 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+  testWidgets("Playback error details can be copied on a narrow screen", (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    String? copied;
+    captureClipboard(tester, (text) => copied = text);
+    final audio = FakeAudioEngine();
+    final settings =
+        MemorySettings()
+          ..snapshot = const SettingsSnapshot(
+            serverUrl: "https://api.example.test",
+            apiKey: "private-key",
+          );
+    await launch(tester, settings, audio: audio);
+    await tapVisible(tester, find.text("Mix を20曲取得"));
+    await tapVisible(tester, find.text("Track a"));
+    audio.emitError("Initial failure");
+    await tester.pumpAndSettle();
+    const failurePosition = Duration(seconds: 37);
+    audio.positionEvents.add(failurePosition);
+    audio.transportDiagnostics = const AudioTransportDiagnostics(
+      route: AudioTransportRoute.m4aLoopback,
+      reset: TransportResetState.completed,
+      proxyGeneration: 2,
+      proxyListening: true,
+      localRequestCount: 1,
+      upstream: MediaTransferDiagnostics(
+        attempts: 1,
+        stage: MediaTransferStage.prefix,
+        failure: MediaTransferFailure.connection,
+      ),
+    );
+    audio.emitError(
+      "音声を再生できません。",
+      details: const FailureDetails(
+        type: "PlayerException",
+        nativeCode: -1009,
+        sourceIndex: 0,
+      ),
+    );
+    await tester.pumpAndSettle();
+    // コピー直前の通知では、エラー発生時の位置を上書きしない。
+    audio.positionEvents.add(Duration.zero);
+    audio.transportDiagnostics = const AudioTransportDiagnostics();
+    await tapVisible(tester, find.byTooltip("エラー詳細をコピー"));
+
+    expect(copied, contains("ネイティブエラーコード: -1009"));
+    expect(copied, contains("音声経路: m4aLoopback"));
+    expect(copied, contains("通信経路の再構築: completed"));
+    expect(copied, contains("配信元取得の失敗種別: connection"));
+    expect(
+      copied,
+      contains("メディアの経過時間(ms): ${failurePosition.inMilliseconds}"),
+    );
+    expect(copied, contains("発生時刻(UTC):"));
+    expect(copied, contains("プレーヤー稼働時間(ms):"));
+    expect(copied, contains("URL再取得後: はい"));
+    expect(copied, isNot(contains("private-key")));
+    expect(copied, isNot(contains("https://")));
+    expect(copied, isNot(contains("Track a")));
+    expect(find.text("エラー詳細をコピーしました。"), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+  testWidgets("Mix HTTP error details can be copied from the error banner", (
+    tester,
+  ) async {
+    String? copied;
+    captureClipboard(tester, (text) => copied = text);
+    final settings =
+        MemorySettings()
+          ..snapshot = const SettingsSnapshot(
+            serverUrl: "https://api.example.test",
+            apiKey: "private-key",
+          );
+    await launch(
+      tester,
+      settings,
+      handler: (request) => http.Response("private-response", 503),
+    );
+    await tapVisible(tester, find.text("Mix を20曲取得"));
+    await tapVisible(tester, find.byTooltip("エラー詳細をコピー"));
+
+    expect(copied, contains("処理: Mix取得"));
+    expect(copied, contains("HTTPステータス: 503"));
+    expect(copied, isNot(contains("private")));
+    expect(tester.takeException(), isNull);
+  });
+  testWidgets("Clipboard failure displays feedback without an uncaught error", (
+    tester,
+  ) async {
+    captureClipboard(
+      tester,
+      (text) => fail("Unexpected copy"),
+      unavailable: true,
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ErrorCopyButton(
+            report: ErrorReport.capture(operation: "再生", message: "再生できません。"),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.byTooltip("エラー詳細をコピー"));
+    await tester.pumpAndSettle();
+
+    expect(find.textContaining("コピーできませんでした"), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 }
 
 class _DiagnosticAudioEngine extends FakeAudioEngine
@@ -373,6 +517,13 @@ class _DiagnosticAudioEngine extends FakeAudioEngine
       'queueLength': 2,
       'sourceCount': 3,
       'durationSource': 'item',
+      "m4aHeaderFields": 3,
+      "m4aHeaderOutcome": "normalized",
+      "m4aHasEditList": true,
+      "m4aEditVersion": 0,
+      "m4aEditEntryCount": 1,
+      "m4aEditStartUs": 36281,
+      "m4aEditDurationUs": 237000000,
       'url': 'https://must-not-be-copied.test/private',
       'videoId': 'do-not-copy-video-id',
       'headers': {'X-API-Key': 'do-not-copy-api-key'},

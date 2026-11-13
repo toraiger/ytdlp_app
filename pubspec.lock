@@ -106,7 +106,7 @@ packages:
     source: hosted
     version: "2.4.0"
   fake_async:
-    dependency: transitive
+    dependency: "direct dev"
     description:
       name: fake_async
       sha256: "5368f224a74523e8d2e7399ea1638b37aecfca824a3cc4dfdf77bf1fa905ac44"
@@ -472,7 +472,7 @@ packages:
     source: hosted
     version: "1.16.0"
   objective_c:
-    dependency: transitive
+    dependency: "direct main"
     description:
       name: objective_c
       sha256: "1f81ed9e41909d44162d7ec8663b2c647c202317cc0b56d3d56f6a13146a0b64"

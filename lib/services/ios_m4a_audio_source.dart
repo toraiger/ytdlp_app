@@ -1,12 +1,14 @@
-import 'dart:async';
-import 'dart:math' as math;
-import 'dart:typed_data';
+import "dart:async";
+import "dart:math" as math;
+import "dart:typed_data";
 
-import 'package:http/http.dart' as http;
-import 'package:just_audio/just_audio.dart';
+import "package:http/http.dart" as http;
+import "package:just_audio/just_audio.dart";
 
-import 'api_http_client.dart';
-import 'm4a_fragment_header.dart';
+import "api_http_client.dart";
+import "../models/audio_transport_diagnostics.dart";
+import "../models/m4a_header_diagnostics.dart";
+import "m4a_fragment_header.dart";
 
 /// Serves the original byte ranges with only empty DASH header durations reset.
 /// A bounded prefix is retained, so playback and seeking do not wait for a full
@@ -18,17 +20,19 @@ class IosM4aAudioSource extends StreamAudioSource {
     super.tag,
     http.Client? client,
     this.timeout = const Duration(seconds: 20),
+    this.onFailure,
+    this.onPrepared,
   }) : _headers = {
          for (final entry in headers.entries)
            if (!{
-             'x-api-key',
-             'range',
-             'host',
-             'content-length',
-             'accept-encoding',
+             "x-api-key",
+             "range",
+             "host",
+             "content-length",
+             "accept-encoding",
            }.contains(entry.key.toLowerCase()))
              entry.key: entry.value,
-         'Accept-Encoding': 'identity',
+         "Accept-Encoding": "identity",
        },
        _client = client ?? createApiHttpClient(),
        super(
@@ -43,6 +47,8 @@ class IosM4aAudioSource extends StreamAudioSource {
   final Map<String, String> _headers;
   final http.Client _client;
   final Duration timeout;
+  final void Function(MediaTransferDiagnostics failure)? onFailure;
+  final void Function()? onPrepared;
   final _requests = <Completer<void>>{};
   Future<void>? _prepared;
   Uint8List _prefix = Uint8List(0);
@@ -51,18 +57,79 @@ class IosM4aAudioSource extends StreamAudioSource {
   String? _validator;
   String? _validatorHeader;
   bool _closed = false;
+  bool _headerReady = false;
+  int _attempts = 0;
+  int _localRequestCount = 0;
+  MediaTransferStage _stage = MediaTransferStage.notStarted;
+  MediaTransferFailure _failureKind = MediaTransferFailure.none;
+  int? _httpStatus;
+  int? _nativeCode;
+
+  int get localRequestCount => _localRequestCount;
+
+  MediaTransferDiagnostics get transferDiagnostics => MediaTransferDiagnostics(
+    attempts: _attempts,
+    stage: _stage,
+    failure: _failureKind,
+    httpStatus: _httpStatus,
+    nativeCode: _nativeCode,
+  );
+
+  void _recordFailure(
+    Object failure,
+    MediaTransferStage stage, {
+    MediaTransferFailure? kind,
+  }) {
+    // Cancellation during cleanup must not replace the failure that caused it.
+    if (_closed || _failureKind != MediaTransferFailure.none) return;
+    _stage = stage;
+    _nativeCode = nativeHttpErrorCode(failure);
+    _failureKind = kind ?? _classifyFailure(failure);
+    if (_failureKind != MediaTransferFailure.cancelled &&
+        _failureKind != MediaTransferFailure.closed) {
+      onFailure?.call(transferDiagnostics);
+    }
+  }
+
+  MediaTransferFailure _classifyFailure(Object failure) {
+    if (failure is TimeoutException) return MediaTransferFailure.timeout;
+    if (failure is http.RequestAbortedException) {
+      return MediaTransferFailure.cancelled;
+    }
+    if (_closed) return MediaTransferFailure.closed;
+    if (failure is http.ClientException) return MediaTransferFailure.connection;
+    return MediaTransferFailure.invalidResponse;
+  }
 
   int? get normalizedDurationFields =>
-      _prepared != null && _length != null
-          ? _header.durationFields.length
-          : null;
+      _headerReady ? _header.durationFields.length : null;
 
-  static StateError _failure() => StateError('Audio data unavailable');
+  M4aHeaderDiagnostics get headerDiagnostics =>
+      _headerReady
+          ? _header.diagnostics
+          : const M4aHeaderDiagnostics(outcome: M4aHeaderOutcome.pending);
+
+  static StateError _failure() => StateError("Audio data unavailable");
+
+  /// Retain the exact prefix/header used later by the native player's requests.
+  /// This wait runs outside the controller's native-operation queue.
+  Future<void> prepare() =>
+      _prepared ??=
+          (() async {
+            try {
+              await _prepare();
+              if (_closed) throw _failure();
+              onPrepared?.call();
+            } catch (failure) {
+              _recordFailure(failure, MediaTransferStage.prefix);
+              rethrow;
+            }
+          })();
 
   Future<void> _prepare() async {
     var wanted = 64 * 1024;
     while (true) {
-      final response = await _open(0, wanted);
+      final response = await _open(0, wanted, stage: MediaTransferStage.prefix);
       final bytes = BytesBuilder(copy: false);
       try {
         await for (final chunk in _slice(
@@ -78,7 +145,10 @@ class IosM4aAudioSource extends StreamAudioSource {
       _prefix = bytes.takeBytes();
       _header = M4aFragmentHeader.inspect(_prefix);
       final required = _header.requiredLength;
-      if (required == null) return;
+      if (required == null) {
+        _headerReady = true;
+        return;
+      }
       if (required <= wanted || required > _length!) throw _failure();
       wanted = required;
     }
@@ -87,6 +157,7 @@ class IosM4aAudioSource extends StreamAudioSource {
   Future<_MediaResponse> _open(
     int start,
     int end, {
+    required MediaTransferStage stage,
     Completer<void>? cancellation,
   }) async {
     if (_closed) throw _failure();
@@ -98,16 +169,21 @@ class IosM4aAudioSource extends StreamAudioSource {
     }
 
     try {
+      _attempts++;
+      if (_failureKind == MediaTransferFailure.none) _stage = stage;
       final request =
-          http.AbortableRequest('GET', uri, abortTrigger: abort.future)
+          http.AbortableRequest("GET", uri, abortTrigger: abort.future)
             ..headers.addAll(_headers)
-            ..headers['Range'] = 'bytes=$start-${end - 1}';
-      if (_validator != null) request.headers['If-Range'] = _validator!;
+            ..headers["Range"] = "bytes=$start-${end - 1}";
+      if (_validator != null) request.headers["If-Range"] = _validator!;
       final response = await _client.send(request).timeout(timeout);
+      if (_failureKind == MediaTransferFailure.none) {
+        _httpStatus = response.statusCode;
+      }
       if (_closed ||
           abort.isCompleted ||
-          !{'', 'identity'}.contains(
-            (response.headers['content-encoding'] ?? '').toLowerCase(),
+          !{"", "identity"}.contains(
+            (response.headers["content-encoding"] ?? "").toLowerCase(),
           )) {
         throw _failure();
       }
@@ -115,8 +191,8 @@ class IosM4aAudioSource extends StreamAudioSource {
       int offset;
       if (response.statusCode == 206) {
         final match = RegExp(
-          r'^bytes (\d+)-(\d+)/(\d+)$',
-        ).firstMatch(response.headers['content-range'] ?? '');
+          r"^bytes (\d+)-(\d+)/(\d+)$",
+        ).firstMatch(response.headers["content-range"] ?? "");
         if (match == null) throw _failure();
         offset = int.parse(match[1]!);
         final last = int.parse(match[2]!);
@@ -133,6 +209,15 @@ class IosM4aAudioSource extends StreamAudioSource {
         length = response.contentLength!;
         offset = 0;
       } else {
+        final failure = _failure();
+        _recordFailure(
+          failure,
+          stage,
+          kind:
+              response.statusCode == 200
+                  ? MediaTransferFailure.invalidResponse
+                  : MediaTransferFailure.httpStatus,
+        );
         throw _failure();
       }
       if (length <= 0) {
@@ -145,57 +230,135 @@ class IosM4aAudioSource extends StreamAudioSource {
                   (response.statusCode != 206 ||
                       response.headers.containsKey(_validatorHeader))))) {
         // A response from another representation must not reuse cached bytes.
+        _recordFailure(
+          _failure(),
+          stage,
+          kind: MediaTransferFailure.invalidResponse,
+        );
         this.close();
         throw _failure();
       }
       // A 206 already confirms If-Range; representation headers can be omitted.
       // A 200 needs an explicit matching validator before cached bytes are used.
       if (_length == null) {
-        final etag = response.headers['etag'];
-        if (etag != null && !etag.startsWith('W/')) {
-          _validatorHeader = 'etag';
+        final etag = response.headers["etag"];
+        if (etag != null && !etag.startsWith("W/")) {
+          _validatorHeader = "etag";
           _validator = etag;
-        } else if (response.headers['last-modified'] != null) {
-          _validatorHeader = 'last-modified';
-          _validator = response.headers['last-modified'];
+        } else if (response.headers["last-modified"] != null) {
+          _validatorHeader = "last-modified";
+          _validator = response.headers["last-modified"];
         }
       }
       _length = length;
-      return _MediaResponse(response.stream, offset, close);
-    } on Object {
+      return _MediaResponse(
+        response.stream,
+        offset,
+        close,
+        stage,
+        () => abort.isCompleted,
+      );
+    } catch (failure) {
+      if (!abort.isCompleted) _recordFailure(failure, stage);
       close();
       // http exceptions can contain signed URLs. Expose a fixed message only.
       throw _failure();
     }
   }
 
-  Stream<List<int>> _slice(_MediaResponse response, int start, int end) async* {
+  Stream<List<int>> _slice(_MediaResponse response, int start, int end) {
+    late StreamController<List<int>> controller;
+    StreamSubscription<List<int>>? subscription;
+    Timer? inactivity;
     var at = response.offset;
     var emitted = 0;
-    try {
-      await for (final chunk in response.stream.timeout(timeout)) {
-        if (_closed) throw _failure();
-        final from = (start - at).clamp(0, chunk.length);
-        final to = (end - at).clamp(0, chunk.length);
-        if (to > from) {
-          emitted += to - from;
-          yield chunk.sublist(from, to);
-        }
-        at += chunk.length;
-        if (at >= end) break;
-      }
-      if (emitted != end - start) throw _failure();
-    } on Object {
-      throw _failure();
-    } finally {
+    var finished = false;
+
+    void cancelUpstream() {
+      inactivity?.cancel();
       response.close();
+      final pending = subscription?.cancel();
+      if (pending != null) {
+        unawaited(pending.catchError((Object ignored) {}));
+      }
     }
+
+    void finish([Object? failure]) {
+      if (finished) return;
+      finished = true;
+      if (failure != null) {
+        if (!response.isCancelled()) _recordFailure(failure, response.stage);
+        controller.addError(_failure());
+      }
+      cancelUpstream();
+      unawaited(controller.close());
+    }
+
+    void armTimeout() {
+      inactivity?.cancel();
+      if (!finished && !controller.isPaused) {
+        inactivity = Timer(
+          timeout,
+          () => finish(TimeoutException("Audio read timeout")),
+        );
+      }
+    }
+
+    controller = StreamController<List<int>>(
+      onListen: () {
+        subscription = response.stream.listen(
+          (chunk) {
+            if (finished) return;
+            if (_closed) {
+              finish(_failure());
+              return;
+            }
+            final from = (start - at).clamp(0, chunk.length);
+            final to = (end - at).clamp(0, chunk.length);
+            if (to > from) {
+              emitted += to - from;
+              controller.add(chunk.sublist(from, to));
+            }
+            at += chunk.length;
+            if (at >= end) {
+              finish(emitted == end - start ? null : _failure());
+            } else {
+              armTimeout();
+            }
+          },
+          onError: (Object failure) => finish(failure),
+          onDone: () => finish(emitted == end - start ? null : _failure()),
+        );
+        armTimeout();
+      },
+      onPause: () {
+        // AVPlayer normally pauses reads once its buffer is full. A body
+        // inactivity timer must be suspended with that consumer, too.
+        inactivity?.cancel();
+        subscription?.pause();
+      },
+      onResume: () {
+        subscription?.resume();
+        armTimeout();
+      },
+      onCancel: () {
+        finished = true;
+        cancelUpstream();
+      },
+    );
+    return controller.stream;
   }
 
   @override
   Future<StreamAudioResponse> request([int? start, int? end]) async {
+    _localRequestCount++;
     if (_closed) throw _failure();
-    await (_prepared ??= _prepare());
+    try {
+      await prepare();
+    } catch (failure) {
+      _recordFailure(failure, MediaTransferStage.prefix);
+      rethrow;
+    }
     final from = start ?? 0;
     final to = math.min(end ?? _length!, _length!);
     if (from < 0 || from >= to) throw _failure();
@@ -203,7 +366,7 @@ class IosM4aAudioSource extends StreamAudioSource {
       sourceLength: _length,
       contentLength: to - from,
       offset: start != null || end != null ? from : null,
-      contentType: 'audio/mp4',
+      contentType: "audio/mp4",
       stream: _serve(from, to),
     );
   }
@@ -222,7 +385,10 @@ class IosM4aAudioSource extends StreamAudioSource {
         // async* cancellation can wait for an idle upstream and then fail.
         // Abort it directly above and consume cleanup errors independently.
         unawaited(
-          pending.then<void>((_) {}, onError: (Object _, StackTrace __) {}),
+          pending.then<void>(
+            (_) {},
+            onError: (Object ignoredError, StackTrace ignoredStack) {},
+          ),
         );
       }
     }
@@ -249,7 +415,12 @@ class IosM4aAudioSource extends StreamAudioSource {
           return;
         }
         final abort = cancellation = Completer<void>();
-        final response = await _open(at, end, cancellation: abort);
+        final response = await _open(
+          at,
+          end,
+          stage: MediaTransferStage.range,
+          cancellation: abort,
+        );
         if (finished) {
           response.close();
           return;
@@ -260,7 +431,9 @@ class IosM4aAudioSource extends StreamAudioSource {
             controller.add(_header.apply(chunk, at));
             at += chunk.length;
           },
-          onError: (Object _, StackTrace __) => finish(failed: true),
+          onError:
+              (Object ignoredError, StackTrace ignoredStack) =>
+                  finish(failed: true),
           onDone: finish,
         );
         if (controller.isPaused) subscription!.pause();
@@ -290,12 +463,21 @@ class IosM4aAudioSource extends StreamAudioSource {
     _requests.clear();
     _client.close();
     _prefix = Uint8List(0);
+    _headerReady = false;
   }
 }
 
 class _MediaResponse {
-  const _MediaResponse(this.stream, this.offset, this.close);
+  const _MediaResponse(
+    this.stream,
+    this.offset,
+    this.close,
+    this.stage,
+    this.isCancelled,
+  );
   final Stream<List<int>> stream;
   final int offset;
   final void Function() close;
+  final MediaTransferStage stage;
+  final bool Function() isCancelled;
 }
