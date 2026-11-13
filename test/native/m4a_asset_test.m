@@ -103,7 +103,38 @@ int main(int argc, const char *argv[]) {
             [queue advanceToNextItem];
         }
         Require(queue.currentItem == nil, @"Queue advanced more than once per item");
-        puts("Native M4A edits, durations, seeks and three-item queue passed");
+        // Rebuilding only upcoming items must preserve the active decoder/time.
+        NSString *currentPath = [directory stringByAppendingPathComponent:cases[0][@"normalized"]];
+        AVPlayerItem *current = [AVPlayerItem playerItemWithURL:[NSURL fileURLWithPath:currentPath]];
+        AVPlayerItem *staleNext = [AVPlayerItem playerItemWithURL:[NSURL fileURLWithPath:currentPath]];
+        queue = [AVQueuePlayer queuePlayerWithItems:@[current, staleNext]];
+        WaitForReady(current);
+        const double activePosition = 0.25;
+        __block BOOL seekFinished = NO;
+        [queue seekToTime:CMTimeMakeWithSeconds(activePosition, 1000)
+            toleranceBefore:kCMTimeZero toleranceAfter:kCMTimeZero
+            completionHandler:^(BOOL finished) { seekFinished = finished; }];
+        NSDate *seekDeadline = [NSDate dateWithTimeIntervalSinceNow:10];
+        while (!seekFinished && seekDeadline.timeIntervalSinceNow > 0) PumpRunLoop();
+        Require(seekFinished, @"Active item could not seek before replacement");
+        CMTime preservedTime = current.currentTime;
+        [queue removeItem:staleNext];
+        NSMutableArray<AVPlayerItem *> *freshItems = [NSMutableArray array];
+        for (NSUInteger itemIndex = 1; itemIndex < queueSize; itemIndex++) {
+            NSURL *url = [NSURL URLWithString:[baseURL stringByAppendingFormat:@"/%@", cases[itemIndex][@"normalized"]]];
+            AVPlayerItem *freshItem = [AVPlayerItem playerItemWithURL:url];
+            [freshItems addObject:freshItem];
+            [queue insertItem:freshItem afterItem:nil];
+        }
+        Require(queue.currentItem == current, @"Upcoming replacement changed the active item");
+        Require(CMTimeCompare(current.currentTime, preservedTime) == 0, @"Upcoming replacement changed the active position");
+        for (AVPlayerItem *freshItem in freshItems) {
+            [queue advanceToNextItem];
+            Require(queue.currentItem == freshItem, @"Fresh items lost their original order");
+            WaitForReady(freshItem);
+        }
+        [queue removeAllItems];
+        puts("Native M4A edits, timing, seeks, upcoming replacement and queue order passed");
     }
     return 0;
 }

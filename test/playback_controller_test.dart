@@ -200,7 +200,7 @@ void main() {
     expect(audio.playing, isTrue);
   });
   test(
-    'List taps and previous reuse the loaded queue and reset time',
+    'List taps reuse the queue and previous reconstructs a retired source',
     () async {
       await playback.playTrack(0);
       await drain();
@@ -215,8 +215,8 @@ void main() {
       expect(playback.currentIndex, 0);
       expect(playback.position, Duration.zero);
       expect(resolutions.where((id) => id == 'a'), hasLength(1));
-      expect(audio.loadCount, 1);
-      expect(audio.stopCount, 1);
+      expect(audio.loadCount, 2);
+      expect(audio.stopCount, 2);
       expect(audio.entries.first.httpHeaders['User-Agent'], 'audio-a');
     },
   );
@@ -619,17 +619,18 @@ void main() {
     },
   );
   test(
-    'Prefetch skips failures and preserves the original list index',
+    'A permanent prefetch failure holds the same next track without skipping',
     () async {
       resolveOverride =
           (id) =>
               id == 'b' ? http.Response('', 403) : jsonResponse(streamJson(id));
       await playback.playTrack(0);
       await drain();
-      expect(audio.entries.map((e) => e.track.videoId), ['a', 'c', 'd']);
-      audio.advance(1);
-      expect(playback.currentIndex, 2);
-      expect(playback.error, contains('スキップ'));
+      expect(audio.entries.map((entry) => entry.track.videoId), ['a']);
+      expect(playback.currentIndex, 0);
+      expect(playback.isPlaying, isTrue);
+      expect(playback.error, contains('認証'));
+      expect(resolutions, ['a', 'b', 'c']);
     },
   );
   test('Tail extension runs once at unchanged length', () async {

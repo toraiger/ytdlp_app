@@ -9,12 +9,14 @@ import '../models/api_timing.dart';
 import '../models/youtube_cookies.dart';
 import 'api_http_client.dart';
 import 'startup_timing.dart';
+import "request_scope.dart";
 
 class ApiFailure implements Exception {
-  const ApiFailure(this.message, {this.statusCode});
+  const ApiFailure(this.message, {this.statusCode, this.retryable = false});
 
   final String message;
   final int? statusCode;
+  final bool retryable;
 
   @override
   String toString() => message;
@@ -55,6 +57,8 @@ class ApiClient {
   final DateTime Function() _now;
   final _streams = <String, _CachedStream>{};
   final _resolving = <String, Future<StreamResponse>>{};
+  final _prefetching = <(RequestScope, String), Future<StreamResponse>>{};
+  final _streamRevisions = <String, int>{};
   bool _closed = false;
   bool get hasApiKey => _apiKey.isNotEmpty;
 
@@ -149,20 +153,32 @@ class ApiClient {
     String videoId, {
     PlaybackMode mode = PlaybackMode.audio,
     bool refresh = false,
+    RequestScope? scope,
   }) {
+    scope?.check();
     if (refresh) {
       invalidateStream(videoId);
     } else {
       final cached = _cachedStream(videoId, mode);
       if (cached != null) return Future.value(cached.response);
     }
+    if (scope != null) {
+      final key = (scope, videoId);
+      return _prefetching[key] ??= _resolveStream(videoId, scope: scope);
+    }
     return _resolving[videoId] ??= _resolveStream(videoId);
   }
 
-  Future<StreamResponse> _resolveStream(String videoId) async {
+  Future<StreamResponse> _resolveStream(
+    String videoId, {
+    RequestScope? scope,
+  }) async {
+    final revision = (_streamRevisions[videoId] ?? 0) + 1;
+    _streamRevisions[videoId] = revision;
     try {
-      final response = await _fetchStream(videoId);
-      if (!_closed) {
+      final response = await _fetchStream(videoId, scope: scope);
+      scope?.check();
+      if (!_closed && _streamRevisions[videoId] == revision) {
         _streams.remove(videoId);
         _streams[videoId] = _CachedStream(response, _now());
         while (_streams.length > 16) {
@@ -171,15 +187,22 @@ class ApiClient {
       }
       return response;
     } finally {
-      unawaited(_resolving.remove(videoId));
+      if (scope == null) {
+        unawaited(_resolving.remove(videoId));
+      } else {
+        unawaited(_prefetching.remove((scope, videoId)));
+      }
     }
   }
 
-  Future<StreamResponse> _fetchStream(String videoId) =>
+  Future<StreamResponse> _fetchStream(String videoId, {RequestScope? scope}) =>
       measureStartup('stream_response', () async {
-        final json = await _post(
+        final json = await _requestJson(
+          "POST",
           ['stream'],
-          {'video_id': videoId, 'include_formats': false},
+          rawBody: jsonEncode({'video_id': videoId, 'include_formats': false}),
+          scope: scope,
+          requestTimeout: scope == null ? null : const Duration(seconds: 20),
         );
         try {
           final response = StreamResponse.fromJson(json);
@@ -216,7 +239,9 @@ class ApiClient {
     String contentType = 'application/json',
     ApiOperation? operation,
     Duration? requestTimeout,
+    RequestScope? scope,
   }) async {
+    scope?.check();
     if (_closed) throw const ApiFailure('API接続が変更されました。画面を開き直してください。');
     if (operation != null && !hasApiKey) {
       throw const ApiFailure('Cookieを送信する前にAPIキーを設定してください。');
@@ -231,8 +256,20 @@ class ApiClient {
         ...path,
       ],
     );
+    final abort = Completer<void>();
+    void cancelRequest() {
+      if (!abort.isCompleted) abort.complete();
+    }
+
     final request =
-        http.Request(method, uri)
+        http.AbortableRequest(
+            method,
+            uri,
+            abortTrigger:
+                scope == null
+                    ? abort.future
+                    : Future.any([abort.future, scope.cancelled]),
+          )
           ..followRedirects = false
           ..headers.addAll({
             'Content-Type': contentType,
@@ -241,12 +278,23 @@ class ApiClient {
           });
     if (rawBody != null) request.bodyBytes = utf8.encode(rawBody);
     try {
-      final response = await (() async {
-        final streamed = await _client.send(request);
-        toHeaders = watch.elapsed;
-        statusCode = streamed.statusCode;
-        return http.Response.fromStream(streamed);
-      })().timeout(requestTimeout ?? timeout);
+      final transfer =
+          (() async {
+            final streamed = await _client.send(request);
+            toHeaders = watch.elapsed;
+            statusCode = streamed.statusCode;
+            return http.Response.fromStream(streamed);
+          })();
+      final response = await (scope == null
+              ? transfer
+              : Future.any([
+                transfer,
+                scope.cancelled.then<http.Response>(
+                  (_) => throw const RequestCancelled(),
+                ),
+              ]))
+          .timeout(requestTimeout ?? timeout);
+      scope?.check();
       if (response.statusCode < 200 || response.statusCode >= 300) {
         final status = response.statusCode;
         if (operation != null && (status == 404 || status == 501)) {
@@ -255,20 +303,33 @@ class ApiClient {
         throw ApiFailure(
           'API エラー（HTTP $status）。サーバー設定と接続状態を確認してください。',
           statusCode: status,
+          retryable:
+              status == 408 || status == 425 || status == 429 || status >= 500,
         );
       }
       final data = jsonObject(jsonDecode(utf8.decode(response.bodyBytes)));
       succeeded = true;
       return data;
     } on TimeoutException {
-      throw const ApiFailure('API の応答がタイムアウトしました。しばらくしてから再度お試しください。');
+      cancelRequest();
+      throw const ApiFailure(
+        'API の応答がタイムアウトしました。しばらくしてから再度お試しください。',
+        retryable: true,
+      );
+    } on http.RequestAbortedException {
+      scope?.check();
+      throw const ApiFailure("API通信が中断されました。", retryable: true);
     } on http.ClientException {
-      throw const ApiFailure('API サーバーに接続できません。URL とネットワークを確認してください。');
+      scope?.check();
+      throw const ApiFailure(
+        'API サーバーに接続できません。URL とネットワークを確認してください。',
+        retryable: true,
+      );
     } on FormatException {
       throw const ApiFailure('API から正しい JSON が返されませんでした。');
     } finally {
       watch.stop();
-      if (!_closed) {
+      if (!_closed && !(scope?.isCancelled ?? false)) {
         lastTiming.value = ApiTiming(
           operation:
               operation ??
@@ -291,6 +352,11 @@ class ApiClient {
     _closed = true;
     _streams.clear();
     _resolving.clear();
+    for (final scope in _prefetching.keys.map((key) => key.$1).toSet()) {
+      scope.cancel();
+    }
+    _prefetching.clear();
+    _streamRevisions.clear();
     _client.close();
     lastTiming.dispose();
   }

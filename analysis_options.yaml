@@ -1,8 +1,8 @@
 include: package:flutter_lints/flutter.yaml
 
 analyzer:
-  # The vendored Dart code is unchanged upstream 0.10.6. Local native changes
-  # are compiled by iOS CI and covered by scripts/test_native_audio.sh.
+  # Upstream Dart lint conventions are retained in the vendored player. Local
+  # transport changes have integration tests; native changes compile in iOS CI.
   exclude:
     - packages/just_audio/**
   errors:

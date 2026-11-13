@@ -6,6 +6,7 @@ import "../build_info.dart";
 import "../models/api_timing.dart";
 import "../models/audio_transport_diagnostics.dart";
 import "../models/playback_diagnostics.dart";
+import "../models/prefetch_diagnostics.dart";
 import "api_client.dart";
 
 /// 例外の本文やdetailsには署名付きURL・ヘッダーが入り得るため、識別用の値だけ残す。
@@ -73,8 +74,20 @@ class ErrorReport {
     this.uptime,
     this.refreshed,
     this.transport,
+    this.prefetch,
   }) : occurredAt = DateTime.now().toUtc(),
        details = FailureDetails.fromException(failure);
+
+  ErrorReport.withPrefetch(ErrorReport original, this.prefetch)
+    : occurredAt = original.occurredAt,
+      operation = original.operation,
+      message = original.message,
+      details = original.details,
+      playback = original.playback,
+      apiTiming = original.apiTiming,
+      uptime = original.uptime,
+      refreshed = original.refreshed,
+      transport = original.transport;
 
   final DateTime occurredAt;
   final String operation;
@@ -85,6 +98,7 @@ class ErrorReport {
   final Duration? uptime;
   final bool? refreshed;
   final AudioTransportDiagnostics? transport;
+  final List<PrefetchDiagnostics>? prefetch;
 
   String toText() {
     final player = playback;
@@ -136,6 +150,8 @@ class ErrorReport {
         "API通信結果: ${timing.statusLabel}",
         "API通信時間(ms): ${timing.total.inMilliseconds}",
       ],
+      for (final preparation in prefetch ?? player?.prefetch ?? const [])
+        preparation.toText(),
     ].join("\n");
   }
 

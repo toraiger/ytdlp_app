@@ -310,7 +310,8 @@ void main() {
       await interrupted.up();
       await tester.pumpAndSettle();
       expect(seeks, 0);
-      expect(audio.snapshot.index, 1);
+      expect(audio.snapshot.index, 0);
+      expect(audio.entries.first.track.videoId, "b");
       expect(tester.widget<Slider>(slider).value, 0);
       expect(tester.takeException(), isNull);
     },

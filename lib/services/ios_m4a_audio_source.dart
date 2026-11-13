@@ -20,6 +20,8 @@ class IosM4aAudioSource extends StreamAudioSource {
     super.tag,
     http.Client? client,
     this.timeout = const Duration(seconds: 20),
+    this.onFailure,
+    this.onPrepared,
   }) : _headers = {
          for (final entry in headers.entries)
            if (!{
@@ -45,6 +47,8 @@ class IosM4aAudioSource extends StreamAudioSource {
   final Map<String, String> _headers;
   final http.Client _client;
   final Duration timeout;
+  final void Function(MediaTransferDiagnostics failure)? onFailure;
+  final void Function()? onPrepared;
   final _requests = <Completer<void>>{};
   Future<void>? _prepared;
   Uint8List _prefix = Uint8List(0);
@@ -77,10 +81,14 @@ class IosM4aAudioSource extends StreamAudioSource {
     MediaTransferFailure? kind,
   }) {
     // Cancellation during cleanup must not replace the failure that caused it.
-    if (_failureKind != MediaTransferFailure.none) return;
+    if (_closed || _failureKind != MediaTransferFailure.none) return;
     _stage = stage;
     _nativeCode = nativeHttpErrorCode(failure);
     _failureKind = kind ?? _classifyFailure(failure);
+    if (_failureKind != MediaTransferFailure.cancelled &&
+        _failureKind != MediaTransferFailure.closed) {
+      onFailure?.call(transferDiagnostics);
+    }
   }
 
   MediaTransferFailure _classifyFailure(Object failure) {
@@ -102,6 +110,21 @@ class IosM4aAudioSource extends StreamAudioSource {
           : const M4aHeaderDiagnostics(outcome: M4aHeaderOutcome.pending);
 
   static StateError _failure() => StateError("Audio data unavailable");
+
+  /// Retain the exact prefix/header used later by the native player's requests.
+  /// This wait runs outside the controller's native-operation queue.
+  Future<void> prepare() =>
+      _prepared ??=
+          (() async {
+            try {
+              await _prepare();
+              if (_closed) throw _failure();
+              onPrepared?.call();
+            } catch (failure) {
+              _recordFailure(failure, MediaTransferStage.prefix);
+              rethrow;
+            }
+          })();
 
   Future<void> _prepare() async {
     var wanted = 64 * 1024;
@@ -243,29 +266,87 @@ class IosM4aAudioSource extends StreamAudioSource {
     }
   }
 
-  Stream<List<int>> _slice(_MediaResponse response, int start, int end) async* {
+  Stream<List<int>> _slice(_MediaResponse response, int start, int end) {
+    late StreamController<List<int>> controller;
+    StreamSubscription<List<int>>? subscription;
+    Timer? inactivity;
     var at = response.offset;
     var emitted = 0;
-    try {
-      await for (final chunk in response.stream.timeout(timeout)) {
-        if (_closed) throw _failure();
-        final from = (start - at).clamp(0, chunk.length);
-        final to = (end - at).clamp(0, chunk.length);
-        if (to > from) {
-          emitted += to - from;
-          yield chunk.sublist(from, to);
-        }
-        at += chunk.length;
-        if (at >= end) break;
-      }
-      if (emitted != end - start) throw _failure();
-    } catch (failure) {
-      // Seeks normally cancel an old range. That is not an upstream failure.
-      if (!response.isCancelled()) _recordFailure(failure, response.stage);
-      throw _failure();
-    } finally {
+    var finished = false;
+
+    void cancelUpstream() {
+      inactivity?.cancel();
       response.close();
+      final pending = subscription?.cancel();
+      if (pending != null) {
+        unawaited(pending.catchError((Object ignored) {}));
+      }
     }
+
+    void finish([Object? failure]) {
+      if (finished) return;
+      finished = true;
+      if (failure != null) {
+        if (!response.isCancelled()) _recordFailure(failure, response.stage);
+        controller.addError(_failure());
+      }
+      cancelUpstream();
+      unawaited(controller.close());
+    }
+
+    void armTimeout() {
+      inactivity?.cancel();
+      if (!finished && !controller.isPaused) {
+        inactivity = Timer(
+          timeout,
+          () => finish(TimeoutException("Audio read timeout")),
+        );
+      }
+    }
+
+    controller = StreamController<List<int>>(
+      onListen: () {
+        subscription = response.stream.listen(
+          (chunk) {
+            if (finished) return;
+            if (_closed) {
+              finish(_failure());
+              return;
+            }
+            final from = (start - at).clamp(0, chunk.length);
+            final to = (end - at).clamp(0, chunk.length);
+            if (to > from) {
+              emitted += to - from;
+              controller.add(chunk.sublist(from, to));
+            }
+            at += chunk.length;
+            if (at >= end) {
+              finish(emitted == end - start ? null : _failure());
+            } else {
+              armTimeout();
+            }
+          },
+          onError: (Object failure) => finish(failure),
+          onDone: () => finish(emitted == end - start ? null : _failure()),
+        );
+        armTimeout();
+      },
+      onPause: () {
+        // AVPlayer normally pauses reads once its buffer is full. A body
+        // inactivity timer must be suspended with that consumer, too.
+        inactivity?.cancel();
+        subscription?.pause();
+      },
+      onResume: () {
+        subscription?.resume();
+        armTimeout();
+      },
+      onCancel: () {
+        finished = true;
+        cancelUpstream();
+      },
+    );
+    return controller.stream;
   }
 
   @override
@@ -273,7 +354,7 @@ class IosM4aAudioSource extends StreamAudioSource {
     _localRequestCount++;
     if (_closed) throw _failure();
     try {
-      await (_prepared ??= _prepare());
+      await prepare();
     } catch (failure) {
       _recordFailure(failure, MediaTransferStage.prefix);
       rethrow;

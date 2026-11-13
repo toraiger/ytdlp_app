@@ -9,10 +9,14 @@
 
 @property (readonly, nonatomic) AVQueuePlayer *player;
 @property (readonly, nonatomic) float speed;
+@property (copy, nonatomic) void (^mixPreparationEvent)(NSDictionary *event);
 
 - (instancetype)initWithRegistrar:(NSObject<FlutterPluginRegistrar> *)registrar playerId:(NSString*)idParam loadConfiguration:(NSDictionary *)loadConfiguration useLazyPreparation:(BOOL)useLazyPreparation;
 - (void)dispose:(BOOL)calledFromDealloc;
 - (NSDictionary *)mixNativeTiming;
+- (NSArray<NSString *> *)mixHoldUpcoming:(NSArray<NSString *> *)sourceIds;
+- (BOOL)mixReplaceUpcoming:(NSDictionary *)request;
+- (BOOL)mixRetirePlayed:(NSDictionary *)request;
 
 @end
 

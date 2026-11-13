@@ -1,3 +1,5 @@
+import "dart:async";
+
 import "package:flutter/foundation.dart";
 import "package:flutter/services.dart";
 import 'package:just_audio/just_audio.dart';
@@ -9,8 +11,37 @@ import "../models/audio_transport_diagnostics.dart";
 import "error_report.dart";
 import "../models/native_playback_timing.dart";
 import "ios_m4a_audio_source.dart";
+import "../models/prefetch_diagnostics.dart";
 
 enum AudioPhase { idle, loading, ready, completed }
+
+class AudioPreparationFailure implements Exception {
+  const AudioPreparationFailure(this.reason, {this.retryable = true});
+  final String reason;
+  final bool retryable;
+}
+
+class AudioPreparationEvent {
+  const AudioPreparationEvent(
+    this.entry,
+    this.networkGeneration,
+    this.stage, {
+    this.failure,
+  });
+  final QueueEntry entry;
+  final int networkGeneration;
+  final PrefetchStage stage;
+  final AudioPreparationFailure? failure;
+}
+
+abstract interface class AudioPreparation {
+  QueueEntry get entry;
+
+  /// Prefix IO finishes before installation; native readiness arrives separately.
+  Future<void> get ready;
+  bool get mediaReady;
+  void cancel();
+}
 
 class AudioStatus {
   const AudioStatus(this.playing, this.phase);
@@ -48,7 +79,12 @@ class QueueEntry {
 }
 
 /// Preserve manifest transports even when the signed URL has no file extension.
-AudioSource createAudioSource(QueueEntry entry, {TargetPlatform? platform}) {
+AudioSource createAudioSource(
+  QueueEntry entry, {
+  TargetPlatform? platform,
+  void Function(MediaTransferDiagnostics)? onFailure,
+  void Function()? onPrepared,
+}) {
   final tag = MediaItem(
     id: entry.track.videoId,
     title: entry.track.title,
@@ -73,7 +109,13 @@ AudioSource createAudioSource(QueueEntry entry, {TargetPlatform? platform}) {
       (platform ?? defaultTargetPlatform) == TargetPlatform.iOS &&
       entry.format?.ext == 'm4a' &&
       (entry.format?.acodec?.startsWith('mp4a.') ?? false)) {
-    return IosM4aAudioSource(entry.uri, headers: entry.httpHeaders, tag: tag);
+    return IosM4aAudioSource(
+      entry.uri,
+      headers: entry.httpHeaders,
+      tag: tag,
+      onFailure: onFailure,
+      onPrepared: onPrepared,
+    );
   }
   // AVPlayer's default timing is approximate. Request precise timing for VOD
   // without changing the media's duration or clipping it to list metadata.
@@ -97,6 +139,17 @@ abstract interface class AudioEngine {
   Stream<Duration?> get durations;
   Stream<int?> get indexes;
   Stream<MediaFailure> get errors;
+  Stream<AudioPreparationEvent> get preparations;
+  AudioPreparation prepare(QueueEntry entry, {required int networkGeneration});
+  Future<bool> installUpcoming(
+    AudioPreparation preparation, {
+    QueueEntry? replacing,
+  });
+  Future<void> holdUpcoming(
+    List<QueueEntry> entries, {
+    bool rotateTransport = false,
+  });
+  Future<bool> retireBefore(int index);
   Future<void> load(QueueEntry entry);
   Future<void> append(QueueEntry entry);
   Future<void> play();
@@ -113,11 +166,173 @@ abstract interface class NativeAudioTimingProvider {
 }
 
 class JustAudioEngine implements AudioEngine, NativeAudioTimingProvider {
+  JustAudioEngine() {
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.iOS) {
+      _nativePreparations = const EventChannel(
+        "com.ryanheise.just_audio.preparations",
+      ).receiveBroadcastStream().listen(
+        _onNativePreparation,
+        onError: (Object failure) {},
+      );
+    }
+  }
   final AudioPlayer _player = AudioPlayer(useProxyForRequestHeaders: false);
   late final NativeTimingRecorder _timing = NativeTimingRecorder(
     _readNativeTiming,
   );
   final _sources = <AudioSource>[];
+  final _entries = <QueueEntry>[];
+  final _preparedSources = <String, _PreparedAudioSource>{};
+  final _preparationEvents =
+      StreamController<AudioPreparationEvent>.broadcast();
+  StreamSubscription<dynamic>? _nativePreparations;
+
+  @override
+  Stream<AudioPreparationEvent> get preparations => _preparationEvents.stream;
+
+  void _emitPreparation(
+    _PreparedAudioSource source,
+    PrefetchStage stage, {
+    AudioPreparationFailure? failure,
+  }) {
+    if (source.cancelled || _preparationEvents.isClosed) return;
+    if (stage == PrefetchStage.ready) source.nativeReady = true;
+    _preparationEvents.add(
+      AudioPreparationEvent(
+        source.entry,
+        source.networkGeneration,
+        stage,
+        failure: failure,
+      ),
+    );
+  }
+
+  void _onNativePreparation(dynamic event) {
+    if (event is! Map) return;
+    final source = _preparedSources[event["sourceId"]];
+    if (source == null) return;
+    if (event["ready"] == true) {
+      _emitPreparation(source, PrefetchStage.ready);
+    } else {
+      final code = event["code"];
+      _emitPreparation(
+        source,
+        PrefetchStage.failed,
+        failure: AudioPreparationFailure(
+          "native_$code",
+          retryable: code != -11828 && code != -11829,
+        ),
+      );
+    }
+  }
+
+  @override
+  AudioPreparation prepare(QueueEntry entry, {required int networkGeneration}) {
+    late _PreparedAudioSource prepared;
+    final source = createAudioSource(
+      entry,
+      onFailure: (failure) {
+        _emitPreparation(
+          prepared,
+          PrefetchStage.failed,
+          failure: AudioPreparationFailure(
+            "${failure.stage.name}_${failure.failure.name}",
+            retryable: failure.failure != MediaTransferFailure.invalidResponse,
+          ),
+        );
+      },
+      onPrepared: () => _emitPreparation(prepared, PrefetchStage.media),
+    );
+    prepared = _PreparedAudioSource(entry, source, networkGeneration, () {
+      // Native can advance before Dart receives its new index. An installed
+      // source is closed only after native confirms it is held or replaced.
+      if (prepared.installed) return;
+      _preparedSources.remove(_player.sourceIdentity(source));
+      if (!identical(source, _currentSource)) {
+        _closeSources([source]);
+        unawaited(
+          _player.releaseLocalSource(source).catchError((Object ignored) {}),
+        );
+      }
+    });
+    _preparedSources[_player.sourceIdentity(source)] = prepared;
+    prepared.ready =
+        source is IosM4aAudioSource ? source.prepare() : Future.value();
+    return prepared;
+  }
+
+  @override
+  Future<bool> installUpcoming(
+    AudioPreparation preparation, {
+    QueueEntry? replacing,
+  }) async {
+    final prepared = preparation as _PreparedAudioSource;
+    if (prepared.cancelled) return false;
+    prepared.installed = true;
+    if (replacing == null) {
+      _sources.add(prepared.source);
+      _entries.add(prepared.entry);
+      await _player.addAudioSource(prepared.source);
+    } else {
+      final index = _entries.indexOf(replacing);
+      if (index < 0 || index <= (snapshot.index ?? 0)) {
+        prepared.installed = false;
+        return false;
+      }
+      if (!await _player.replaceUpcomingAudioSource(index, prepared.source)) {
+        prepared.installed = false;
+        return false;
+      }
+      final previous = _sources[index];
+      _sources[index] = prepared.source;
+      _entries[index] = prepared.entry;
+      await _forgetSource(previous);
+    }
+    // Other platforms expose readiness through their ordinary playback stream.
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.iOS) {
+      _emitPreparation(prepared, PrefetchStage.ready);
+    }
+    return true;
+  }
+
+  @override
+  Future<void> holdUpcoming(
+    List<QueueEntry> entries, {
+    bool rotateTransport = false,
+  }) async {
+    final sources = <AudioSource>[];
+    for (final entry in entries) {
+      final index = _entries.indexOf(entry);
+      if (index > (snapshot.index ?? 0)) sources.add(_sources[index]);
+    }
+    final held = await _player.holdUpcomingAudioSources(sources);
+    for (final source in sources) {
+      if (held.contains(_player.sourceIdentity(source))) {
+        _closeSources([source]);
+      }
+    }
+    if (rotateTransport) _player.rotateLocalProxy();
+  }
+
+  @override
+  Future<bool> retireBefore(int index) async {
+    if (index <= 0 || snapshot.index != index) return false;
+    final previous = _sources.take(index).toList();
+    if (!await _player.retirePlayedAudioSources(index)) return false;
+    _sources.removeRange(0, index);
+    _entries.removeRange(0, index);
+    for (final source in previous) {
+      await _forgetSource(source);
+    }
+    return true;
+  }
+
+  Future<void> _forgetSource(AudioSource source) async {
+    _preparedSources.remove(_player.sourceIdentity(source));
+    _closeSources([source]);
+    await _player.releaseLocalSource(source);
+  }
+
   int _timingEpoch = 0;
   AudioTransportRoute _route = AudioTransportRoute.unknown;
   TransportResetState _reset = TransportResetState.notRequested;
@@ -243,11 +458,16 @@ class JustAudioEngine implements AudioEngine, NativeAudioTimingProvider {
     _sources
       ..clear()
       ..add(source);
+    _entries
+      ..clear()
+      ..add(entry);
     try {
       await _player.setAudioSources([source]);
       await _captureTiming(NativeTimingPhase.load, epoch: epoch);
     } finally {
-      _closeSources(previous);
+      for (final oldSource in previous) {
+        await _forgetSource(oldSource);
+      }
     }
   }
 
@@ -256,11 +476,13 @@ class JustAudioEngine implements AudioEngine, NativeAudioTimingProvider {
     final epoch = _timingEpoch;
     final source = createAudioSource(entry);
     _sources.add(source);
+    _entries.add(entry);
     try {
       await _player.addAudioSource(source);
       await _captureTiming(NativeTimingPhase.append, epoch: epoch);
     } on Object {
       _sources.remove(source);
+      _entries.remove(entry);
       _closeSources([source]);
       rethrow;
     }
@@ -292,6 +514,11 @@ class JustAudioEngine implements AudioEngine, NativeAudioTimingProvider {
       // one player. Stop native reads before closing clients and proxy routes.
       _closeSources(_sources);
       _sources.clear();
+      _entries.clear();
+      for (final source in _preparedSources.values.toList()) {
+        source.cancel();
+      }
+      _preparedSources.clear();
       await _player.resetLocalProxy();
       _reset = TransportResetState.completed;
     } catch (failure) {
@@ -313,10 +540,17 @@ class JustAudioEngine implements AudioEngine, NativeAudioTimingProvider {
     _timingEpoch++;
     _timing.invalidate(clear: true);
     try {
+      await _nativePreparations?.cancel();
       await _player.dispose();
     } finally {
+      for (final source in _preparedSources.values.toList()) {
+        source.cancel();
+      }
+      _preparedSources.clear();
       _closeSources(_sources);
       _sources.clear();
+      _entries.clear();
+      await _preparationEvents.close();
     }
   }
 
@@ -324,6 +558,35 @@ class JustAudioEngine implements AudioEngine, NativeAudioTimingProvider {
     for (final source in sources) {
       if (source is IosM4aAudioSource) source.close();
     }
+  }
+}
+
+class _PreparedAudioSource implements AudioPreparation {
+  _PreparedAudioSource(
+    this.entry,
+    this.source,
+    this.networkGeneration,
+    this._release,
+  );
+  @override
+  final QueueEntry entry;
+  final AudioSource source;
+  final int networkGeneration;
+  final void Function() _release;
+  @override
+  late Future<void> ready;
+  @override
+  bool get mediaReady =>
+      source is IosM4aAudioSource &&
+      (source as IosM4aAudioSource).normalizedDurationFields != null;
+  bool cancelled = false;
+  bool installed = false;
+  bool nativeReady = false;
+  @override
+  void cancel() {
+    if (cancelled) return;
+    cancelled = true;
+    _release();
   }
 }
 

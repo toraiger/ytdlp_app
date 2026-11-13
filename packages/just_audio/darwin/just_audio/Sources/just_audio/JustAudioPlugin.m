@@ -1,11 +1,13 @@
 #import "./include/just_audio/JustAudioPlugin.h"
 #import "./include/just_audio/AudioPlayer.h"
+#import "./include/just_audio/BetterEventChannel.h"
 #import <AVFoundation/AVFoundation.h>
 #include <TargetConditionals.h>
 
 @implementation JustAudioPlugin {
     NSObject<FlutterPluginRegistrar>* _registrar;
     NSMutableDictionary<NSString *, AudioPlayer *> *_players;
+    BetterEventChannel *_preparationEvents;
 }
 
 + (void)registerWithRegistrar:(NSObject<FlutterPluginRegistrar>*)registrar {
@@ -21,6 +23,8 @@
     NSAssert(self, @"super init cannot be nil");
     _registrar = registrar;
     _players = [[NSMutableDictionary alloc] init];
+    _preparationEvents = [[BetterEventChannel alloc]
+        initWithName:@"com.ryanheise.just_audio.preparations" messenger:[registrar messenger]];
     return self;
 }
 
@@ -36,6 +40,11 @@
             result(flutterError);
         } else {
             AudioPlayer* player = [[AudioPlayer alloc] initWithRegistrar:_registrar playerId:playerId loadConfiguration:loadConfiguration useLazyPreparation:useLazyPreparation];
+            __weak JustAudioPlugin *weakSelf = self;
+            player.mixPreparationEvent = ^(NSDictionary *event) {
+                JustAudioPlugin *strongSelf = weakSelf;
+                if (strongSelf) [strongSelf->_preparationEvents sendEvent:event];
+            };
             [_players setValue:player forKey:playerId];
             result(nil);
         }
@@ -53,6 +62,21 @@
         result(@{});
     }
 #if TARGET_OS_IOS
+    else if ([@"mixHoldUpcoming" isEqualToString:call.method]) {
+        NSDictionary *request = call.arguments;
+        NSArray *held = [_players[request[@"playerId"]] mixHoldUpcoming:request[@"sourceIds"]];
+        result(held ?: @[]);
+    }
+    else if ([@"mixReplaceUpcoming" isEqualToString:call.method]) {
+        NSDictionary *request = call.arguments;
+        AudioPlayer *player = _players[request[@"playerId"]];
+        result(@(player != nil && [player mixReplaceUpcoming:request]));
+    }
+    else if ([@"mixRetirePlayed" isEqualToString:call.method]) {
+        NSDictionary *request = call.arguments;
+        AudioPlayer *player = _players[request[@"playerId"]];
+        result(@(player != nil && [player mixRetirePlayed:request]));
+    }
     else if ([@"mixGetNativeTiming" isEqualToString:call.method]) {
         // Mix Player owns one audio player, including the background wrapper.
         // Refuse ambiguous data instead of inspecting an unrelated player.
@@ -65,6 +89,7 @@
 }
 
 - (void)dealloc {
+    [_preparationEvents dispose];
     for (NSString *playerId in _players) {
         [_players[playerId] dispose:YES];
     }

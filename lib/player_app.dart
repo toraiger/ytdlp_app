@@ -869,7 +869,9 @@ class _MiniPlayerState extends State<_MiniPlayer> {
                             ),
                             const SizedBox(height: 3),
                             Text(
-                              playback.isBusy
+                              playback.isWaitingForNext
+                                  ? "次曲を準備中"
+                                  : playback.isBusy
                                   ? playback.isResolvingUrl
                                       ? '再生 URL を取得中…'
                                       : 'メディアを読み込み中…'
@@ -927,7 +929,7 @@ class _MiniPlayerState extends State<_MiniPlayer> {
                       ),
                       const SizedBox(width: 8),
                       IconButton.filled(
-                        tooltip: playback.isPlaying ? '一時停止' : '再生',
+                        tooltip: playback.playbackRequested ? '一時停止' : '再生',
                         style: IconButton.styleFrom(
                           backgroundColor: _accent,
                           foregroundColor: _background,
@@ -943,7 +945,7 @@ class _MiniPlayerState extends State<_MiniPlayer> {
                                   ),
                                 )
                                 : Icon(
-                                  playback.isPlaying
+                                  playback.playbackRequested
                                       ? Icons.pause_rounded
                                       : Icons.play_arrow_rounded,
                                 ),
@@ -1238,6 +1240,7 @@ String _playbackReport(PlaybackDiagnostics info) {
       ],
     ]);
   }
+  report.addAll(info.prefetch.map((preparation) => preparation.toText()));
   return report.join('\n');
 }
 
