@@ -8,6 +8,7 @@
 #import "./include/just_audio/LoopingAudioSource.h"
 #import "./include/just_audio/ClippingAudioSource.h"
 #import "./include/just_audio/MixAudioTimeline.h"
+#import "MixMethodResult.h"
 #import <AVFoundation/AVFoundation.h>
 #import <stdlib.h>
 #include <TargetConditionals.h>
@@ -211,12 +212,9 @@ static id MixTimeNumber(CMTime time) {
 - (void)mixPreparationForItem:(IndexedPlayerItem *)item {
     if (!self.mixPreparationEvent || !item.audioSource) return;
     if (item.status != AVPlayerItemStatusReadyToPlay && item.status != AVPlayerItemStatusFailed) return;
-    self.mixPreparationEvent(@{
-        @"sourceId": item.audioSource.sourceId,
-        @"index": @([self indexForItem:item]),
-        @"ready": @(item.status == AVPlayerItemStatusReadyToPlay),
-        @"code": @(item.error.code)
-    });
+    self.mixPreparationEvent(MixPreparationEvent(item.audioSource.sourceId,
+        [self indexForItem:item], item.status == AVPlayerItemStatusReadyToPlay,
+        item.error.code));
 }
 
 - (NSArray<NSString *> *)mixHoldUpcoming:(NSArray<NSString *> *)sourceIds {

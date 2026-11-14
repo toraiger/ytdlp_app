@@ -19,6 +19,29 @@ static void checkResult(BOOL applied, BOOL expected) {
     CHECK(result.boolValue == expected);
 }
 
+static void checkPreparationEvents(void) {
+    // Exercise the event payload builder used by AudioPlayer, including its
+    // nested ready field. Dart compares this field to true, so integer 1 fails.
+    NSInteger readyStatus = 1;
+    NSInteger failedStatus = 2;
+    for (NSNumber *status in @[@(readyStatus), @(failedStatus)]) {
+        BOOL ready = status.integerValue == readyStatus;
+        NSInteger errorCode = ready ? 0 : -1004;
+        NSDictionary *event = MixPreparationEvent(@"next-source", 1,
+            status.integerValue == readyStatus, errorCode);
+        CHECK([event[@"sourceId"] isEqualToString:@"next-source"]);
+        CHECK([event[@"index"] integerValue] == 1);
+        CHECK([event[@"code"] integerValue] == errorCode);
+        CHECK(CFGetTypeID((__bridge CFTypeRef)event[@"ready"]) == CFBooleanGetTypeID());
+        CHECK([event[@"ready"] boolValue] == ready);
+        CHECK(CFGetTypeID((__bridge CFTypeRef)event[@"index"]) != CFBooleanGetTypeID());
+        CHECK(CFGetTypeID((__bridge CFTypeRef)event[@"code"]) != CFBooleanGetTypeID());
+    }
+    NSNumber *legacyReady = @(readyStatus == 1);
+    CHECK(legacyReady.boolValue);
+    CHECK(CFGetTypeID((__bridge CFTypeRef)legacyReady) != CFBooleanGetTypeID());
+}
+
 int main(void) {
     @autoreleasepool {
         // Success, a refused mutation and a missing player must all be bools.
@@ -32,6 +55,7 @@ int main(void) {
         NSNumber *legacyResult = @(playerExists && YES);
         CHECK(!legacyResult.boolValue);
         CHECK(CFGetTypeID((__bridge CFTypeRef)legacyResult) != CFBooleanGetTypeID());
+        checkPreparationEvents();
         printf("Native method result checks passed: %u\n", checks);
     }
     return 0;

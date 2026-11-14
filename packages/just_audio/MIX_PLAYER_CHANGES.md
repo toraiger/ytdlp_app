@@ -37,6 +37,9 @@ Local changes:
 - Guarded replacement and retirement results use explicit CFBoolean values.
   Boxing Objective-C logical expressions directly produces integers, which
   fail Dart's `invokeMethod<bool>` cast even when the native mutation succeeds.
+- Preparation events use the same Boolean conversion for `ready`. A boxed
+  comparison produces integer 1, which Dart treats as a failed preparation.
+  The production event builder is covered by the native CFBoolean type checks.
 - `rotateLocalProxy()` assigns fresh routes to new sources while keeping active
   routes alive. Replaced/played sources release their routes; a retired listener
   closes when its last source is released. Stop/reset/dispose close all listeners.
