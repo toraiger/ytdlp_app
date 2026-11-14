@@ -7,6 +7,7 @@ import "package:http/http.dart" as http;
 import "package:mix_player_app/controllers/mix_controller.dart";
 import "package:mix_player_app/controllers/playback_controller.dart";
 import "package:mix_player_app/models/prefetch_diagnostics.dart";
+import "package:mix_player_app/models/api_failure_diagnostics.dart";
 import "package:mix_player_app/services/app_settings.dart";
 import "package:mix_player_app/services/error_report.dart";
 import "package:mix_player_app/services/network_path.dart";
@@ -108,6 +109,37 @@ void main() {
       expect(report, contains("先読み対象の曲番号: 2"));
       expect(report, contains("先読み差し替え結果: replaced"));
       expect(report, isNot(contains("https://")));
+    },
+  );
+
+  test(
+    'Parallel prefetch failures retain separate request diagnostics for copying',
+    () async {
+      resolve = (id) {
+        if (id == 'b') throw http.ClientException('connection lost');
+        if (id == 'c') return http.Response('private-response-body', 503);
+        return jsonResponse(streamJson(id));
+      };
+      await playback.playTrack(0);
+      await drain();
+      final states = playback.diagnostics.prefetch;
+      final next = states.firstWhere((state) => state.listIndex == 1);
+      final following = states.firstWhere((state) => state.listIndex == 2);
+      expect(next.lastApiFailure!.kind, ApiFailureKind.connection);
+      expect(next.lastApiFailure!.timing.statusCode, isNull);
+      expect(following.lastApiFailure!.kind, ApiFailureKind.httpStatus);
+      expect(following.lastApiFailure!.timing.statusCode, 503);
+      final report = playback.errorReport!.toText();
+      final nextSection =
+          report.split('先読み対象の曲番号: 2').last.split('先読み対象の曲番号: 3').first;
+      final followingSection = report.split('先読み対象の曲番号: 3').last;
+      expect(nextSection, contains('API失敗種別: connection'));
+      expect(nextSection, isNot(contains('HTTP 503')));
+      expect(followingSection, contains('HTTP 503'));
+      expect(report, isNot(contains('private-response-body')));
+      expect(report, isNot(contains('https://')));
+      expect(playback.currentIndex, 0);
+      expect(playback.isPlaying, isTrue);
     },
   );
 

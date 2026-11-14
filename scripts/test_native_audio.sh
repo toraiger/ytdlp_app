@@ -12,6 +12,13 @@ cleanup() {
 trap cleanup EXIT
 
 xcrun clang -fobjc-arc -Wall -Wextra -Werror \
+  -framework Foundation -framework CoreFoundation \
+  -I "$mix_native_source" \
+  "$mix_native_root/test/native/method_result_test.m" \
+  -o "$mix_native_build/method_result_test"
+"$mix_native_build/method_result_test"
+
+xcrun clang -fobjc-arc -Wall -Wextra -Werror \
   -framework Foundation -framework CoreMedia \
   -I "$mix_native_source/include/just_audio" \
   "$mix_native_source/MixAudioTimeline.m" \

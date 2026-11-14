@@ -1,6 +1,7 @@
 #import "./include/just_audio/JustAudioPlugin.h"
 #import "./include/just_audio/AudioPlayer.h"
 #import "./include/just_audio/BetterEventChannel.h"
+#import "MixMethodResult.h"
 #import <AVFoundation/AVFoundation.h>
 #include <TargetConditionals.h>
 
@@ -70,12 +71,12 @@
     else if ([@"mixReplaceUpcoming" isEqualToString:call.method]) {
         NSDictionary *request = call.arguments;
         AudioPlayer *player = _players[request[@"playerId"]];
-        result(@(player != nil && [player mixReplaceUpcoming:request]));
+        result(MixBooleanResult(player != nil && [player mixReplaceUpcoming:request]));
     }
     else if ([@"mixRetirePlayed" isEqualToString:call.method]) {
         NSDictionary *request = call.arguments;
         AudioPlayer *player = _players[request[@"playerId"]];
-        result(@(player != nil && [player mixRetirePlayed:request]));
+        result(MixBooleanResult(player != nil && [player mixRetirePlayed:request]));
     }
     else if ([@"mixGetNativeTiming" isEqualToString:call.method]) {
         // Mix Player owns one audio player, including the background wrapper.
