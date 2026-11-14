@@ -1,5 +1,18 @@
 # 検証記録
 
+## 2026-11-14 iOS の音源解放・先読み差し替え結果の型
+
+ビルド28（`92fd6d9`）で報告された、再生中の「再生済み音源の解放に失敗しました。」と `_TypeError` を調査しました。iOS の `mixRetirePlayed` と `mixReplaceUpcoming` は論理式を直接 `@(...)` で包んでおり、Flutter のチャネルに整数の `0/1` を返していました。Dart 側の `invokeMethod<bool>` と一致しないため、ネイティブ処理が実行された後でも結果の受信で例外になります。
+
+両メソッドで共通の `MixBooleanResult` を使い、成功・拒否・プレーヤー不在時の結果を明示的な CFBoolean にしました。ネイティブ回帰テストは実際の返却ヘルパーを呼び、StandardMethodCodec が真偽値の識別に使う Core Foundation の型IDを検査します。従来の整数返却が値だけの検査では見逃されることも確認し、既存の macOS CI のネイティブテストに追加しました。
+
+- Linux / Flutter 3.32.5: `flutter pub get --enforce-lockfile --offline` 成功。
+- `flutter analyze --no-pub`: No issues found。
+- `flutter test --no-pub`: 全227件成功（ローカルソケットを利用できる環境で実行）。
+- Dart フォーマット検査: 52ファイル、変更不要。ネイティブテストスクリプトの構文検査と `git diff --check` 成功。
+- ネイティブ回帰テストと iOS ビルドは macOS が必要なため、この Linux 環境では未実行。
+- iPhone 実機での連続再生・回線切替・長時間再生の確認は未実施。
+
 検証日: 2026-10-13。Linux クラウド環境、Flutter 3.32.5 / Dart 3.8.1 を使用。
 
 ## 完了した検証

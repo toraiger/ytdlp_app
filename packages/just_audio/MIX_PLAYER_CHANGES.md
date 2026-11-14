@@ -34,6 +34,9 @@ Local changes:
   verify native item identity on the main thread. They preserve the current
   decoder when Dart index events arrive late. Dart and the background handler's
   playlist are synchronized after a successful guarded mutation.
+- Guarded replacement and retirement results use explicit CFBoolean values.
+  Boxing Objective-C logical expressions directly produces integers, which
+  fail Dart's `invokeMethod<bool>` cast even when the native mutation succeeds.
 - `rotateLocalProxy()` assigns fresh routes to new sources while keeping active
   routes alive. Replaced/played sources release their routes; a retired listener
   closes when its last source is released. Stop/reset/dispose close all listeners.
