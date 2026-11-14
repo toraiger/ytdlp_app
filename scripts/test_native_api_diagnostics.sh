@@ -31,7 +31,10 @@ import sys
 print(Path(sys.argv[1]).resolve().parent.parent)
 PY
 )
+# @Native falls back to process lookup when VM tests have no native asset map.
+# Preload the FFI plugin into the test process to make its symbols available.
 # Invoke Dart directly so macOS does not strip DYLD_* while starting a shell.
+DYLD_INSERT_LIBRARIES="$mix_build/objective_c.framework/objective_c${DYLD_INSERT_LIBRARIES:+:$DYLD_INSERT_LIBRARIES}" \
 DYLD_FRAMEWORK_PATH="$mix_build${DYLD_FRAMEWORK_PATH:+:$DYLD_FRAMEWORK_PATH}" \
   "$mix_flutter_root/bin/cache/dart-sdk/bin/dart" \
   "$mix_flutter_root/bin/cache/flutter_tools.snapshot" \
