@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:video_player/video_player.dart';
 
 import '../models/api_models.dart';
+import '../models/api_failure_diagnostics.dart';
 import '../models/playback_diagnostics.dart';
 import "../models/prefetch_diagnostics.dart";
 import '../services/api_client.dart';
@@ -731,6 +732,7 @@ class PlaybackController extends ChangeNotifier {
 
   void _failPrefetch(_PrefetchJob job, Object failure) {
     if (!_ownsPrefetch(job) || job.scope?.isCancelled == true) return;
+    job.lastApiFailure = failure is ApiFailure ? failure.diagnostics : null;
     final retryable =
         failure is ApiFailure
             ? failure.retryable
@@ -1391,6 +1393,7 @@ class _PrefetchJob {
   int retryCount = 0;
   String reason = "none";
   String replacement = "pending";
+  ApiFailureDiagnostics? lastApiFailure;
 
   PrefetchDiagnostics get diagnostics => PrefetchDiagnostics(
     listIndex: index,
@@ -1401,5 +1404,6 @@ class _PrefetchJob {
     mediaReady: mediaReady,
     nativeReady: nativeReady,
     replacement: replacement,
+    lastApiFailure: lastApiFailure,
   );
 }

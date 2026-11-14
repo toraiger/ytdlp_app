@@ -477,6 +477,44 @@ void main() {
     expect(copied, isNot(contains("private")));
     expect(tester.takeException(), isNull);
   });
+  testWidgets(
+    'The existing copy button includes redacted API originals and a stack',
+    (tester) async {
+      String? copied;
+      captureClipboard(tester, (text) => copied = text);
+      await launch(
+        tester,
+        MemorySettings()
+          ..snapshot = const SettingsSnapshot(
+            serverUrl: 'https://api.example.test',
+            apiKey: 'test-key',
+          ),
+        handler:
+            (_) =>
+                throw http.ClientException(
+                  'Connection lost https://api.example.test/?token=private-token\nAuthorization: Bearer private-auth',
+                ),
+      );
+      await tapVisible(tester, find.text('Mix を20曲取得'));
+      await tapVisible(tester, find.byTooltip('エラー詳細をコピー'));
+      expect(copied, contains('元の例外の種類: ClientException'));
+      expect(copied, contains('API失敗段階: waitingHeaders'));
+      expect(copied, contains('元の例外メッセージ（伏せ字済み）: Connection lost'));
+      expect(copied, contains('Dartスタックトレース（伏せ字済み）:'));
+      expect(copied, contains('[URL]'));
+      for (final secret in [
+        'private-token',
+        'private-auth',
+        'https://',
+        'test-key',
+      ]) {
+        expect(copied, isNot(contains(secret)));
+      }
+      expect(find.text('エラー詳細をコピーしました。'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
   testWidgets("Clipboard failure displays feedback without an uncaught error", (
     tester,
   ) async {

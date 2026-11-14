@@ -157,9 +157,18 @@ void main() {
           ),
         );
         expect(normalFailure, isNull);
+        final detail = (prefetchFailure as ApiFailure).diagnostics!;
+        expect(detail.timeout, const Duration(seconds: 20));
+        expect(detail.causeType, 'TimeoutException');
+        expect(detail.timing.toHeaders, isNull);
+        expect(detail.networkGeneration, 1);
         expect(client.aborted, 1);
         clock.elapse(const Duration(seconds: 70));
         expect(normalFailure, isA<ApiFailure>());
+        expect(
+          (normalFailure as ApiFailure).diagnostics!.timeout,
+          const Duration(seconds: 90),
+        );
         expect(client.aborted, 2);
         api.close();
       });

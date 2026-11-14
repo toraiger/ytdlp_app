@@ -4,18 +4,20 @@ import "package:just_audio/just_audio.dart";
 
 import "../build_info.dart";
 import "../models/api_timing.dart";
+import "../models/api_failure_diagnostics.dart";
 import "../models/audio_transport_diagnostics.dart";
 import "../models/playback_diagnostics.dart";
 import "../models/prefetch_diagnostics.dart";
 import "api_client.dart";
 
-/// 例外の本文やdetailsには署名付きURL・ヘッダーが入り得るため、識別用の値だけ残す。
+/// Raw exception text is excluded unless captured by the API's redaction path.
 class FailureDetails {
   const FailureDetails({
     required this.type,
     this.nativeCode,
     this.sourceIndex,
     this.httpStatusCode,
+    this.apiFailure,
   });
 
   factory FailureDetails.fromException(Object? failure) {
@@ -31,6 +33,7 @@ class FailureDetails {
       return FailureDetails(
         type: "ApiFailure",
         httpStatusCode: failure.statusCode,
+        apiFailure: failure.diagnostics,
       );
     }
     if (failure is PlatformException) {
@@ -54,6 +57,7 @@ class FailureDetails {
   final int? nativeCode;
   final int? sourceIndex;
   final int? httpStatusCode;
+  final ApiFailureDiagnostics? apiFailure;
 }
 
 class MediaFailure implements Exception {
@@ -70,13 +74,16 @@ class ErrorReport {
     required this.message,
     Object? failure,
     this.playback,
-    this.apiTiming,
+    ApiTiming? apiTiming,
     this.uptime,
     this.refreshed,
     this.transport,
     this.prefetch,
   }) : occurredAt = DateTime.now().toUtc(),
-       details = FailureDetails.fromException(failure);
+       details = FailureDetails.fromException(failure),
+       apiTiming =
+           (failure is ApiFailure ? failure.diagnostics?.timing : null) ??
+           apiTiming;
 
   ErrorReport.withPrefetch(ErrorReport original, this.prefetch)
     : occurredAt = original.occurredAt,
@@ -145,7 +152,9 @@ class ErrorReport {
         "メディアの長さ(ms): ${player.mediaDuration?.inMilliseconds ?? "不明"}",
         "メディアの経過時間(ms): ${player.mediaPosition.inMilliseconds}",
       ],
-      if (timing != null) ...[
+      if (details.apiFailure != null)
+        details.apiFailure!.toText()
+      else if (timing != null) ...[
         "直近のAPI通信（先読みを含む）: ${timing.operation.label}",
         "API通信結果: ${timing.statusLabel}",
         "API通信時間(ms): ${timing.total.inMilliseconds}",

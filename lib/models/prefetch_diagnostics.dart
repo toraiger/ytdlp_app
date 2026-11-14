@@ -1,6 +1,8 @@
+import 'api_failure_diagnostics.dart';
+
 enum PrefetchStage { url, media, native, ready, retry, offline, failed }
 
-/// Fixed labels and numbers only: signed URLs and error text stay private.
+/// Request-local API failure details have already been redacted and bounded.
 class PrefetchDiagnostics {
   const PrefetchDiagnostics({
     required this.listIndex,
@@ -11,6 +13,7 @@ class PrefetchDiagnostics {
     this.mediaReady = false,
     this.nativeReady = false,
     this.replacement = "pending",
+    this.lastApiFailure,
   });
 
   final int listIndex;
@@ -21,6 +24,7 @@ class PrefetchDiagnostics {
   final bool mediaReady;
   final bool nativeReady;
   final String replacement;
+  final ApiFailureDiagnostics? lastApiFailure;
 
   String toText() => [
     "先読み対象の曲番号: ${listIndex + 1}",
@@ -31,5 +35,6 @@ class PrefetchDiagnostics {
     "先読み音声データ準備完了: $mediaReady",
     "先読みネイティブ準備完了: $nativeReady",
     "先読み差し替え結果: $replacement",
+    if (lastApiFailure != null) lastApiFailure!.toText(),
   ].join("\n");
 }

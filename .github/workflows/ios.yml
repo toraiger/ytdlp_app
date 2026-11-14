@@ -10,8 +10,10 @@ on:
       - 'lib/**'
       - 'packages/just_audio/**'
       - 'test/native/**'
+      - 'test/native_api_error_test.dart'
       - 'test/fixtures/**'
       - 'scripts/test_native_audio.sh'
+      - 'scripts/test_native_api_diagnostics.sh'
       - 'scripts/normalize_m4a_fixture.dart'
       - 'scripts/prepare_m4a_fixtures.dart'
       - 'test/support/m4a_fixture.dart'
@@ -47,6 +49,8 @@ jobs:
           channel: stable
           cache: true
       - run: flutter pub get --enforce-lockfile
+      - name: Test native NSError diagnostics through the Dart API client
+        run: bash scripts/test_native_api_diagnostics.sh
       - name: Test native audio timing, completion order and M4A assets
         run: bash scripts/test_native_audio.sh
       - name: Build release app for iPhone without signing

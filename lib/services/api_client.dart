@@ -6,17 +6,25 @@ import 'package:http/http.dart' as http;
 
 import '../models/api_models.dart';
 import '../models/api_timing.dart';
+import '../models/api_failure_diagnostics.dart';
 import '../models/youtube_cookies.dart';
 import 'api_http_client.dart';
 import 'startup_timing.dart';
+import 'diagnostic_redactor.dart';
 import "request_scope.dart";
 
 class ApiFailure implements Exception {
-  const ApiFailure(this.message, {this.statusCode, this.retryable = false});
+  const ApiFailure(
+    this.message, {
+    this.statusCode,
+    this.retryable = false,
+    this.diagnostics,
+  });
 
   final String message;
   final int? statusCode;
   final bool retryable;
+  final ApiFailureDiagnostics? diagnostics;
 
   @override
   String toString() => message;
@@ -62,39 +70,39 @@ class ApiClient {
   bool _closed = false;
   bool get hasApiKey => _apiKey.isNotEmpty;
 
-  Future<YoutubeCookieStatus> youtubeCookieStatus() async =>
-      _decodeCookieStatus(
-        await _requestJson('GET', [
-          'youtube',
-          'cookies',
-        ], operation: ApiOperation.youtubeCookieStatus),
-      );
+  Future<YoutubeCookieStatus> youtubeCookieStatus() => _requestJson(
+    'GET',
+    ['youtube', 'cookies'],
+    operation: ApiOperation.youtubeCookieStatus,
+    decode: YoutubeCookieStatus.fromJson,
+    invalidResponseMessage: 'Cookie保存状態の応答形式が正しくありません。',
+  );
 
   Future<YoutubeCookieStatus> uploadYoutubeCookies(
     YoutubeCookies cookies,
   ) async {
-    final result = _decodeCookieStatus(
-      await _requestJson(
-        'PUT',
-        ['youtube', 'cookies'],
-        rawBody: cookies.toNetscape(),
-        contentType: 'text/plain',
-        operation: ApiOperation.youtubeCookieUpload,
-        requestTimeout: const Duration(seconds: 120),
-      ),
+    final body = cookies.toNetscape();
+    return _requestJson(
+      'PUT',
+      ['youtube', 'cookies'],
+      rawBody: body,
+      sensitiveValues: body
+          .split('\n')
+          .map((line) => line.split('\t'))
+          .where((fields) => fields.length == 7)
+          .map((fields) => fields.last),
+      contentType: 'text/plain',
+      operation: ApiOperation.youtubeCookieUpload,
+      requestTimeout: const Duration(seconds: 120),
+      decode: (json) {
+        final result = YoutubeCookieStatus.fromJson(json);
+        if (!result.configured) {
+          throw const ApiFailure('Cookieの登録が完了しませんでした。保存状態を確認してください。');
+        }
+        return result;
+      },
+      invalidResponseMessage: 'Cookie保存状態の応答形式が正しくありません。',
     );
-    if (!result.configured) {
-      throw const ApiFailure('Cookieの登録が完了しませんでした。保存状態を確認してください。');
-    }
-    return result;
-  }
-
-  YoutubeCookieStatus _decodeCookieStatus(Map<String, dynamic> json) {
-    try {
-      return YoutubeCookieStatus.fromJson(json);
-    } on FormatException {
-      throw const ApiFailure('Cookie保存状態の応答形式が正しくありません。');
-    }
   }
 
   StreamFormat? cachedMedia(String videoId, PlaybackMode mode) {
@@ -143,11 +151,11 @@ class ApiClient {
   // Mixの応答時間をURL取得・プレーヤー読み込みの時間と分けて計測する。
   Future<MixResponse> fetchMix(String url, {int count = 20}) => measureStartup(
     'mix_response',
-    () async => _decodeMix(await _post(['mix'], {'url': url, 'count': count})),
+    () => _post(['mix'], {'url': url, 'count': count}),
   );
 
   Future<MixResponse> extendMix(String sessionId, {int count = 20}) async =>
-      _decodeMix(await _post(['mix', sessionId, 'extend'], {'count': count}));
+      _post(['mix', sessionId, 'extend'], {'count': count});
 
   Future<StreamResponse> resolveStream(
     String videoId, {
@@ -197,42 +205,33 @@ class ApiClient {
 
   Future<StreamResponse> _fetchStream(String videoId, {RequestScope? scope}) =>
       measureStartup('stream_response', () async {
-        final json = await _requestJson(
+        return _requestJson(
           "POST",
           ['stream'],
           rawBody: jsonEncode({'video_id': videoId, 'include_formats': false}),
           scope: scope,
           requestTimeout: scope == null ? null : const Duration(seconds: 20),
+          decode: (json) {
+            final response = StreamResponse.fromJson(json);
+            if (response.videoId != videoId) {
+              throw const ApiFailure('再生 URL が要求した曲と一致しません。Mix を取得し直してください。');
+            }
+            return response;
+          },
+          invalidResponseMessage: '再生 URL の応答形式が正しくありません。',
         );
-        try {
-          final response = StreamResponse.fromJson(json);
-          if (response.videoId != videoId) {
-            throw const ApiFailure('再生 URL が要求した曲と一致しません。Mix を取得し直してください。');
-          }
-          return response;
-        } on FormatException {
-          throw const ApiFailure('再生 URL の応答形式が正しくありません。');
-        } on TypeError {
-          throw const ApiFailure('再生 URL の応答形式が正しくありません。');
-        }
       });
 
-  MixResponse _decodeMix(Map<String, dynamic> json) {
-    try {
-      return MixResponse.fromJson(json);
-    } on FormatException {
-      throw const ApiFailure('Mix の応答形式が正しくありません。');
-    } on TypeError {
-      throw const ApiFailure('Mix の応答形式が正しくありません。');
-    }
-  }
+  Future<MixResponse> _post(List<String> path, Map<String, dynamic> body) =>
+      _requestJson(
+        'POST',
+        path,
+        rawBody: jsonEncode(body),
+        decode: MixResponse.fromJson,
+        invalidResponseMessage: 'Mix の応答形式が正しくありません。',
+      );
 
-  Future<Map<String, dynamic>> _post(
-    List<String> path,
-    Map<String, dynamic> body,
-  ) => _requestJson('POST', path, rawBody: jsonEncode(body));
-
-  Future<Map<String, dynamic>> _requestJson(
+  Future<T> _requestJson<T>(
     String method,
     List<String> path, {
     String? rawBody,
@@ -240,6 +239,9 @@ class ApiClient {
     ApiOperation? operation,
     Duration? requestTimeout,
     RequestScope? scope,
+    Iterable<String> sensitiveValues = const [],
+    required T Function(Map<String, dynamic>) decode,
+    required String invalidResponseMessage,
   }) async {
     scope?.check();
     if (_closed) throw const ApiFailure('API接続が変更されました。画面を開き直してください。');
@@ -250,6 +252,16 @@ class ApiClient {
     Duration? toHeaders;
     int? statusCode;
     var succeeded = false;
+    var stage = ApiFailureStage.waitingHeaders;
+    var decodingModel = false;
+    final effectiveTimeout = requestTimeout ?? timeout;
+    final apiOperation =
+        operation ??
+        (path.last == 'extend'
+            ? ApiOperation.extend
+            : path.first == 'stream'
+            ? ApiOperation.stream
+            : ApiOperation.mix);
     final uri = baseUri.replace(
       pathSegments: [
         ...baseUri.pathSegments.where((segment) => segment.isNotEmpty),
@@ -277,12 +289,65 @@ class ApiClient {
             'X-API-Key': _apiKey,
           });
     if (rawBody != null) request.bodyBytes = utf8.encode(rawBody);
+    final redactor = DiagnosticRedactor(
+      secrets: [
+        _apiKey,
+        baseUri.host,
+        ...sensitiveValues,
+        if (path.length > 1 && path.first == 'mix') path[1],
+      ],
+    );
+
+    ApiTiming timing() => ApiTiming(
+      operation: apiOperation,
+      total: watch.elapsed,
+      succeeded: succeeded,
+      toHeaders: toHeaders,
+      statusCode: statusCode,
+    );
+
+    ApiFailure detailed(
+      ApiFailure wrapped,
+      Object cause,
+      StackTrace stack,
+      ApiFailureKind kind,
+    ) {
+      // Never serialize FormatException.source, response bodies or NSError.userInfo.
+      final originalMessage =
+          cause is http.ClientException
+              ? cause.message
+              : cause is FormatException
+              ? cause.message
+              : cause.toString();
+      return ApiFailure(
+        wrapped.message,
+        statusCode: wrapped.statusCode,
+        retryable: wrapped.retryable,
+        diagnostics: ApiFailureDiagnostics(
+          occurredAt: _now().toUtc(),
+          timing: timing(),
+          stage: stage,
+          kind: kind,
+          timeout: effectiveTimeout,
+          retryable: wrapped.retryable,
+          causeType: cause.runtimeType.toString(),
+          message: redactor.message(originalMessage),
+          stack: redactor.stack(stack),
+          isPrefetch: scope != null,
+          networkGeneration: scope?.networkGeneration,
+          nativeDomain: nativeHttpErrorDomain(cause),
+          nativeCode: nativeHttpErrorCode(cause),
+        ),
+      );
+    }
+
     try {
       final transfer =
           (() async {
             final streamed = await _client.send(request);
             toHeaders = watch.elapsed;
             statusCode = streamed.statusCode;
+            stage = ApiFailureStage.responseBody;
             return http.Response.fromStream(streamed);
           })();
       final response = await (scope == null
@@ -293,7 +358,7 @@ class ApiClient {
                   (_) => throw const RequestCancelled(),
                 ),
               ]))
-          .timeout(requestTimeout ?? timeout);
+          .timeout(effectiveTimeout);
       scope?.check();
       if (response.statusCode < 200 || response.statusCode >= 300) {
         final status = response.statusCode;
@@ -307,42 +372,71 @@ class ApiClient {
               status == 408 || status == 425 || status == 429 || status >= 500,
         );
       }
+      stage = ApiFailureStage.decode;
       final data = jsonObject(jsonDecode(utf8.decode(response.bodyBytes)));
+      decodingModel = true;
+      final result = decode(data);
       succeeded = true;
-      return data;
-    } on TimeoutException {
+      return result;
+    } on TimeoutException catch (failure, stack) {
       cancelRequest();
-      throw const ApiFailure(
-        'API の応答がタイムアウトしました。しばらくしてから再度お試しください。',
-        retryable: true,
+      throw detailed(
+        const ApiFailure(
+          'API の応答がタイムアウトしました。しばらくしてから再度お試しください。',
+          retryable: true,
+        ),
+        failure,
+        stack,
+        ApiFailureKind.timeout,
       );
-    } on http.RequestAbortedException {
+    } on http.RequestAbortedException catch (failure, stack) {
       scope?.check();
-      throw const ApiFailure("API通信が中断されました。", retryable: true);
-    } on http.ClientException {
-      scope?.check();
-      throw const ApiFailure(
-        'API サーバーに接続できません。URL とネットワークを確認してください。',
-        retryable: true,
+      throw detailed(
+        const ApiFailure("API通信が中断されました。", retryable: true),
+        failure,
+        stack,
+        ApiFailureKind.interrupted,
       );
-    } on FormatException {
-      throw const ApiFailure('API から正しい JSON が返されませんでした。');
+    } on http.ClientException catch (failure, stack) {
+      scope?.check();
+      throw detailed(
+        const ApiFailure(
+          'API サーバーに接続できません。URL とネットワークを確認してください。',
+          retryable: true,
+        ),
+        failure,
+        stack,
+        ApiFailureKind.connection,
+      );
+    } on FormatException catch (failure, stack) {
+      throw detailed(
+        ApiFailure(
+          decodingModel ? invalidResponseMessage : 'API から正しい JSON が返されませんでした。',
+        ),
+        failure,
+        stack,
+        ApiFailureKind.invalidResponse,
+      );
+    } on TypeError catch (failure, stack) {
+      throw detailed(
+        ApiFailure(invalidResponseMessage),
+        failure,
+        stack,
+        ApiFailureKind.invalidResponse,
+      );
+    } on ApiFailure catch (failure, stack) {
+      throw detailed(
+        failure,
+        failure,
+        stack,
+        stage == ApiFailureStage.decode
+            ? ApiFailureKind.invalidResponse
+            : ApiFailureKind.httpStatus,
+      );
     } finally {
       watch.stop();
       if (!_closed && !(scope?.isCancelled ?? false)) {
-        lastTiming.value = ApiTiming(
-          operation:
-              operation ??
-              (path.last == 'extend'
-                  ? ApiOperation.extend
-                  : path.first == 'stream'
-                  ? ApiOperation.stream
-                  : ApiOperation.mix),
-          total: watch.elapsed,
-          succeeded: succeeded,
-          toHeaders: toHeaders,
-          statusCode: statusCode,
-        );
+        lastTiming.value = timing();
       }
     }
   }
